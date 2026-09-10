@@ -1039,6 +1039,7 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 		if previous := s.imageTasks[task.ID]; previous != nil && previous.OwnerID == owner {
 			task = previous
 		} else {
+			pruneTerminalTasksLocked(s.imageTasks, imageTaskTerminal, func(t *imageTaskState) string { return t.UpdatedAt })
 			s.imageTasks[task.ID] = task
 			go s.runImageTask(task, r.Header.Get("Authorization"), r.Header.Get("X-API-Key"))
 		}
@@ -1151,6 +1152,7 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	if previous := s.imageTasks[clientID]; previous != nil && previous.OwnerID == owner {
 		task = previous
 	} else {
+		pruneTerminalTasksLocked(s.imageTasks, imageTaskTerminal, func(t *imageTaskState) string { return t.UpdatedAt })
 		s.imageTasks[clientID] = task
 		go s.runImageTask(task, r.Header.Get("Authorization"), r.Header.Get("X-API-Key"))
 	}
@@ -1238,6 +1240,11 @@ func (s *Server) runImageTask(task *imageTaskState, authHeader, apiKey string) {
 			task.Error = "image generation failed"
 		}
 	}
+	// 终态已定，原始上传字节不再被任何人读取（请求早已在锁外构建完毕）。
+	// 单条最高 112MB（7 文件 × 16MB），而任务表只增不删——不释放的话，
+	// 任何持有 API Key 的人重复提交编辑任务就能把进程内存撑爆。
+	task.Images = nil
+	task.Prompt = ""
 }
 
 func (s *Server) finishImageTaskError(task *imageTaskState, message string) {
@@ -1246,6 +1253,54 @@ func (s *Server) finishImageTaskError(task *imageTaskState, message string) {
 	task.Status = "error"
 	task.Error = message
 	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	// 这里也要释放：runImageTask 在 multipart 构建失败时会走这条早退路径，
+	// 不释放就等于绕过了主路径的回收。
+	task.Images = nil
+	task.Prompt = ""
+}
+
+// maxRetainedTasks 是任务表保留的条数上限。
+//
+// 任务里存着原始图片字节（imageTasks 单条最高 112MB：7 文件 × 16MB）或 base64 串，
+// 而两张表历来只增不删、终态也不释放字节——任何持有 API Key 的人重复提交
+// 编辑任务即可把进程内存撑爆。这是唯一不需要控制台权限的远程打爆入口。
+const maxRetainedTasks = 200
+
+// pruneTerminalTasksLocked 在任务表达到上限时丢弃最旧的终态任务。
+//
+// 与 refreshProgress 同一套做法：优先丢已完成的；全都未完成才丢最旧的，
+// 保证表有硬上界而不会把在途任务误杀。调用方必须持对应的锁。
+func pruneTerminalTasksLocked[T any](tasks map[string]T, isTerminal func(T) bool, updatedAt func(T) string) {
+	if len(tasks) < maxRetainedTasks {
+		return
+	}
+	candidateID, candidateAt := "", ""
+	for id, task := range tasks {
+		if !isTerminal(task) {
+			continue
+		}
+		if at := updatedAt(task); candidateID == "" || at < candidateAt {
+			candidateID, candidateAt = id, at
+		}
+	}
+	if candidateID == "" {
+		for id, task := range tasks {
+			if at := updatedAt(task); candidateID == "" || at < candidateAt {
+				candidateID, candidateAt = id, at
+			}
+		}
+	}
+	if candidateID != "" {
+		delete(tasks, candidateID)
+	}
+}
+
+func imageTaskTerminal(task *imageTaskState) bool {
+	return task.Status != "queued" && task.Status != "running"
+}
+
+func editableTaskTerminal(task *editableFileTaskState) bool {
+	return task.Status != "queued" && task.Status != "running"
 }
 
 // maxImageTaskCount 是 /api/image-tasks 单次可请求的张数。
@@ -1518,6 +1573,7 @@ func (s *Server) editableFileTasksAPI(w http.ResponseWriter, r *http.Request) {
 	if old := s.fileTasks[key]; old != nil {
 		task = old
 	} else {
+		pruneTerminalTasksLocked(s.fileTasks, editableTaskTerminal, func(t *editableFileTaskState) string { return t.UpdatedAt })
 		s.fileTasks[key] = task
 		s.saveEditableFileTasksLocked()
 	}
@@ -1597,6 +1653,7 @@ func (s *Server) editableGeneration(w http.ResponseWriter, r *http.Request, kind
 	if old := s.fileTasks[key]; old != nil {
 		task = old
 	} else {
+		pruneTerminalTasksLocked(s.fileTasks, editableTaskTerminal, func(t *editableFileTaskState) string { return t.UpdatedAt })
 		s.fileTasks[key] = task
 		s.saveEditableFileTasksLocked()
 	}
@@ -1649,6 +1706,10 @@ func (s *Server) runEditableFileTask(task *editableFileTaskState) {
 			task.Error = ""
 			task.Result = result
 			task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			// 终态已定，上传的 base64 输入不再被读取——它与图片任务同样
+			// 只增不删，且这条路径同样是 requireAPI。
+			task.Images = nil
+			task.Prompt = ""
 			s.saveEditableFileTasksLocked()
 			s.fileTaskMu.Unlock()
 			s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
@@ -1662,6 +1723,8 @@ func (s *Server) runEditableFileTask(task *editableFileTaskState) {
 	task.Status = "error"
 	task.Error = firstNonEmpty(errorString(err), "editable file task failed")
 	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	task.Images = nil
+	task.Prompt = ""
 	s.saveEditableFileTasksLocked()
 	s.fileTaskMu.Unlock()
 }
