@@ -333,11 +333,14 @@ func (c *OpenAIAccountClient) cachedClearance(proxyURL string) clearanceBundle {
 }
 
 func (c *OpenAIAccountClient) refreshClearance(ctx context.Context, proxyURL, method, targetURL, token string, account map[string]any, targetPath string) (clearanceBundle, error) {
-	c.clearanceMu.Lock()
-	defer c.clearanceMu.Unlock()
-	if bundle := c.clearance[proxyURL]; bundle.Cookie != "" || bundle.UserAgent != "" {
+	// 快路径：缓存命中直接返回。只在这一小段持锁。
+	if bundle := c.cachedClearance(proxyURL); bundle.Cookie != "" || bundle.UserAgent != "" {
 		return bundle, nil
 	}
+	// 下面整段（最长 60s 的 FlareSolverr 求解）必须在**锁外**执行。
+	// cachedClearance 被每个账号端点请求调用（getJSON），用的是同一把锁——
+	// 持锁做 I/O 等于让任一代理的一次 Cloudflare 403 把全部账号、全部代理的
+	// 请求一起卡住最长 60 秒。
 	timeout := c.ClearanceTimeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -415,7 +418,15 @@ func (c *OpenAIAccountClient) refreshClearance(ctx context.Context, proxyURL, me
 		}
 		return clearanceBundle{}, errors.New(detail)
 	}
-	c.clearance[proxyURL] = bundle
+	// 回填时加锁并 double-check：并发的另一个请求可能已经解出了同一份 clearance，
+	// 那就用它的——后到的不得覆盖先到的。
+	c.clearanceMu.Lock()
+	if existing, ok := c.clearance[proxyURL]; ok && (existing.Cookie != "" || existing.UserAgent != "") {
+		bundle = existing
+	} else {
+		c.clearance[proxyURL] = bundle
+	}
+	c.clearanceMu.Unlock()
 	return bundle, nil
 }
 
