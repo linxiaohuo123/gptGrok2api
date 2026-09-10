@@ -1,16 +1,19 @@
 {
   "name": "chatgpt2api-console",
   "private": true,
-  "version": "1.2.4",
+  "version": "3.2.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "icons:generate": "node scripts/generate-local-icons.mjs",
+    "icons:check": "node scripts/generate-local-icons.mjs --check",
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean:dist && tsc && vite build",
+    "build": "npm run icons:check && npm run clean:dist && tsc && vite build",
     "build:server": "npm run build && node -e \"const fs = require('fs'); fs.rmSync('../web_dist', { recursive: true, force: true }); fs.cpSync('dist', '../web_dist', { recursive: true })\"",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "^1.2.121",
     "@iconify/vue": "^5.0.0",
     "@types/js-beautify": "^1.14.3",
     "@types/markdown-it": "^14.1.2",
@@ -26,9 +29,9 @@
     "highlight.js": "^11.11.1",
     "js-beautify": "^1.15.4",
     "markdown-it": "^14.2.0",
-    "nanocat-ui": "^0.1.6",
+    "nanocat-ui": "0.1.10",
     "pinia": "^3.0.4",
-    "vue": "^3.5.26",
+    "vue": "^3.5.41",
     "vue-router": "^4.6.4",
     "vue-virtual-scroller": "^2.0.0-beta.8"
   },

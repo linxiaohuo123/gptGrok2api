@@ -1,7 +1,15 @@
+// [INPUT]: accounts/provider/protocol/proxy，以及 image/gif、image/png 等图像解码
+// [OUTPUT]: /v1/images/generations 与 /v1/images/edits 的全部实现
+// [POS]: 图片请求最长链路：排队 → 取号 → 出网 → 轮询 → 下载 → 落盘 → 记录。全系图像模型支持。
+//         张数上界（maxImageGenerateCount / maxImageEditCount）只在本文件定义，
+//         公开端点与内部调度器端点都必须引用它；generateOpenAIImageData 还会在分配前
+//         再钳一次——count 直接决定切片长度与 goroutine 数量，任何新增调用点漏了校验，
+//         最坏只是少给几张图，而不是把进程打爆。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -32,7 +40,7 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
-var cookieUserIDPattern = regexp.MustCompile(`(?:^|;\s*)x-userid=([^;]+)`)
+var mediaFileIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{16,64}$`)
 
 const maxImageEditReferenceBytes = 50 << 20
 
@@ -82,23 +90,25 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt cannot be empty", "invalid_request_error")
 		return
 	}
+	if err := s.checkSensitiveWords(request.Prompt); err != nil {
+		writeSensitiveWordError(w)
+		return
+	}
 	if request.N == 0 {
 		request.N = 1
 	}
 	if request.Size == "" {
 		request.Size = "1024x1024"
 	}
-	if isOpenAIImageModel(request.Model) {
-		request.Size = provider.NormalizeOpenAIImageSize(request.Size)
-	}
+	request.Size = provider.NormalizeOpenAIImageSize(request.Size)
 	if request.ResponseFormat == "" {
 		request.ResponseFormat = "url"
 	}
 	if request.Quality == "" {
 		request.Quality = "auto"
 	}
-	if request.N < 1 || request.N > 10 {
-		writeError(w, http.StatusBadRequest, "n must be between 1 and 10", "invalid_request_error")
+	if !validImageCount(request.N, maxImageGenerateCount) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("n must be between 1 and %d", maxImageGenerateCount), "invalid_request_error")
 		return
 	}
 	spec, ok := model.Find(s.catalog, request.Model)
@@ -106,74 +116,45 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is not an image model", "invalid_request_error")
 		return
 	}
-	if !isOpenAIImageModel(request.Model) {
-		if _, ok := protocol.AspectRatio(request.Size); !ok {
-			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
-			return
-		}
-	} else if !validOpenAIImageSize(request.Size) {
+	if !validOpenAIImageSize(request.Size) {
 		writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
 		return
 	}
-	if isOpenAIImageModel(request.Model) {
-		data, err := s.generateOpenAIImageData(r, r.Context(), request.Prompt, request.Model, request.Size, request.Quality, nil, request.ResponseFormat, requestPublicBase(r), request.N)
-		if err != nil {
-			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
-			return
-		}
-		s.stageRequestMonitor(r, "image_response_ready", 99, map[string]any{"response_ms": s.requestMonitorElapsed(r)})
-		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
-		return
-	}
-	s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
-	accountStarted := time.Now()
-	lease, err := s.accountPool.Reserve(r.Context(), mediaPools(request.Model), nil)
+	data, err := s.generateOpenAIImageData(r, r.Context(), request.Prompt, request.Model, request.Size, request.Quality, nil, request.ResponseFormat, requestPublicBase(r), request.N)
 	if err != nil {
-		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
-		return
-	}
-	defer s.accountPool.Release(lease)
-	s.enrichMonitorAccount(r, lease.Account)
-	s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
-	generationStarted := time.Now()
-	var images []provider.ImageResult
-	if request.Model == "grok-imagine-image-lite" {
-		images, err = s.mediaProvider.GenerateLite(r.Context(), lease.Account, request.Prompt, "fast", request.N)
-	} else {
-		aspect, _ := protocol.AspectRatio(request.Size)
-		images, err = s.mediaProvider.GenerateImagine(r.Context(), lease.Account, request.Prompt, aspect, request.N, true, request.Model == "grok-imagine-image-pro", s.cfg.ImagineWSURL)
-	}
-	if err != nil {
-		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 		return
 	}
-	s.stageRequestMonitor(r, "image_generating", 70, map[string]any{"conversation_stream_ms": time.Since(generationStarted).Milliseconds(), "generation_start_ms": time.Since(generationStarted).Milliseconds()})
-	if len(images) > request.N {
-		images = images[:request.N]
-	}
-	data := make([]map[string]string, 0, len(images))
-	for _, image := range images {
-		resolveStarted := time.Now()
-		value, resolveErr := s.mediaProvider.ResolveImage(r.Context(), lease.Account, image, request.ResponseFormat, s.cfg.ImageDataDir, requestPublicBase(r))
-		if resolveErr != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(resolveErr), resolveErr)
-			writeError(w, upstreamStatus(resolveErr), resolveErr.Error(), "upstream_error")
-			return
-		}
-		s.stageRequestMonitor(r, "image_resolving", 85, map[string]any{"resolve_ms": time.Since(resolveStarted).Milliseconds()})
-		s.stageRequestMonitor(r, "image_download_done", 95, map[string]any{"download_ms": time.Since(resolveStarted).Milliseconds()})
-		s.recordGeneratedMedia(r.Context(), value)
-		data = append(data, value)
-	}
-	s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
-	s.stageRequestMonitor(r, "image_single_done", 99, map[string]any{"total_ms": s.requestMonitorElapsed(r), "response_ms": s.requestMonitorElapsed(r)})
+	s.stageRequestMonitor(r, "image_response_ready", 99, map[string]any{"response_ms": s.requestMonitorElapsed(r)})
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+}
+
+// 图片请求的张数上界。数字只有这一处定义：公开端点、内部调度器端点、
+// 以及下面的分配兜底全都引用它。
+//
+// 历史上公开的编辑端点校验 n<=2，而内部 execute-edit 完全不校验——同一个
+// 逻辑操作，两条路径，一条设防一条裸奔。把上界收敛成常量并让分配点自守，
+// 这类"新增调用点忘了校验"才不会再变成 OOM。
+const (
+	maxImageGenerateCount = 10
+	maxImageEditCount     = 2
+)
+
+// validImageCount 判定张数是否落在允许区间。上界是硬约束而非提示：
+// 它直接决定下面会分配多长的切片、派生多少 goroutine。
+func validImageCount(count, limit int) bool {
+	return count >= 1 && count <= limit
 }
 
 func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int) ([]map[string]string, error) {
 	if count < 1 {
 		count = 1
+	}
+	// 分配前的最后一道闸：count 直接决定结果切片长度与随后派生的 goroutine 数。
+	// 调用点仍须各自校验并返回 400（客户端该看到明确拒绝），这里是兜底——
+	// 任何新增路径漏了校验，最坏也只是少给几张图，而不是打爆进程。
+	if count > maxImageGenerateCount {
+		count = maxImageGenerateCount
 	}
 	results := make([][]map[string]string, count)
 	ctx, timeoutCancel := context.WithTimeout(ctx, imageRequestTotalTimeout(s.cfg.RequestTimeout))
@@ -224,6 +205,10 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 					s.accountPool.Release(lease)
 					s.accountPool.Feedback(lease.Account, upstreamStatus(generateErr), generateErr)
 					excluded[lease.Account.Token] = true
+					if errors.Is(generateErr, context.Canceled) || ctx.Err() != nil {
+						cancel()
+						return
+					}
 					if s.shouldRetry(upstreamStatus(generateErr), attempt) {
 						continue
 					}
@@ -240,7 +225,11 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 						resolveErr = err
 						break
 					}
-					s.recordGeneratedMedia(ctx, map[string]string{"url": localURL})
+					s.recordGeneratedMedia(ctx, map[string]string{
+						"url":    localURL,
+						"width":  strconv.Itoa(image.Width),
+						"height": strconv.Itoa(image.Height),
+					})
 					items = append(items, value)
 					// Each worker represents exactly one requested output. Upstream can
 					// expose that output through multiple references, so resolving the
@@ -251,6 +240,10 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 					s.accountPool.Release(lease)
 					s.accountPool.Feedback(lease.Account, upstreamStatus(resolveErr), resolveErr)
 					excluded[lease.Account.Token] = true
+					if errors.Is(resolveErr, context.Canceled) || ctx.Err() != nil {
+						cancel()
+						return
+					}
 					if s.shouldRetry(upstreamStatus(resolveErr), attempt) {
 						continue
 					}
@@ -727,26 +720,26 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	modelName := strings.TrimSpace(request.Model)
 	prompt := strings.TrimSpace(request.Prompt)
 	if modelName == "" {
-		modelName = "grok-imagine-image-edit"
+		modelName = "gpt-image-2"
 	}
 	s.enrichRequestMonitor(r, map[string]any{"model": modelName})
 	if prompt == "" {
 		writeError(w, http.StatusBadRequest, "prompt cannot be empty", "invalid_request_error")
 		return
 	}
+	if err := s.checkSensitiveWords(prompt); err != nil {
+		writeSensitiveWordError(w)
+		return
+	}
 	n := request.N
 	if n == 0 {
 		n = 1
 	}
-	if n > 2 {
-		writeError(w, http.StatusBadRequest, "n must be between 1 and 2", "invalid_request_error")
+	if !validImageCount(n, maxImageEditCount) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("n must be between 1 and %d", maxImageEditCount), "invalid_request_error")
 		return
 	}
-	if !isOpenAIImageModel(modelName) && strings.TrimSpace(request.Size) != "" && strings.TrimSpace(request.Size) != "1024x1024" {
-		writeError(w, http.StatusBadRequest, "image edit only supports size 1024x1024", "invalid_request_error")
-		return
-	}
-	if _, ok := model.Find(s.catalog, modelName); !ok || (modelName != "grok-imagine-image-edit" && !isOpenAIImageModel(modelName)) {
+	if _, ok := model.Find(s.catalog, modelName); !ok || !isOpenAIImageModel(modelName) {
 		writeError(w, http.StatusBadRequest, "model is not an image-edit model", "invalid_request_error")
 		return
 	}
@@ -762,77 +755,16 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	if len(inputs) > 7 {
 		inputs = inputs[len(inputs)-7:]
 	}
-	if isOpenAIImageModel(modelName) {
-		size := strings.TrimSpace(request.Size)
-		if size == "" {
-			size = "1024x1024"
-		}
-		format := imageEditResponseFormat(request.ResponseFormat)
-		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n)
-		if err != nil {
-			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
-		return
+	size := strings.TrimSpace(request.Size)
+	if size == "" {
+		size = "1024x1024"
 	}
-	lease, err := s.accountPool.Reserve(r.Context(), []string{"super", "heavy"}, nil)
-	if err != nil {
-		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
-		return
-	}
-	defer s.accountPool.Release(lease)
-	refs := make([]string, 0, len(inputs))
-	for _, input := range inputs {
-		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
-		if uploadErr != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(uploadErr), uploadErr)
-			writeError(w, upstreamStatus(uploadErr), uploadErr.Error(), "upstream_error")
-			return
-		}
-		ref := protocol.ResolveAssetReference(fileID, fileURI, cookieUserID(lease.Account))
-		if ref == "" {
-			writeError(w, http.StatusBadGateway, "uploaded image has no resolvable asset URL", "upstream_error")
-			return
-		}
-		refs = append(refs, ref)
-	}
-	post, err := s.mediaProvider.CreatePost(r.Context(), lease.Account, protocol.ImagePostMediaType, "", prompt)
-	if err != nil {
-		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
-		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
-		return
-	}
-	postObject, _ := post["post"].(map[string]any)
-	parentID := stringValue(postObject["id"])
-	if parentID == "" {
-		writeError(w, http.StatusBadGateway, "image edit create-post returned no post id", "upstream_error")
-		return
-	}
-	response, err := s.mediaProvider.StreamChat(r.Context(), lease.Account, protocol.BuildImageEditPayload(prompt, refs, parentID))
-	if err != nil {
-		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
-		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
-		return
-	}
-	defer response.Body.Close()
-	images := collectImageEvents(response.Body)
-	if len(images) == 0 {
-		writeError(w, http.StatusBadGateway, "image edit returned no images", "upstream_error")
-		return
-	}
-	data := make([]map[string]string, 0, minInt(n, len(images)))
 	format := imageEditResponseFormat(request.ResponseFormat)
-	for _, image := range images[:minInt(n, len(images))] {
-		value, resolveErr := s.mediaProvider.ResolveImage(r.Context(), lease.Account, image, format, s.cfg.ImageDataDir, requestPublicBase(r))
-		if resolveErr != nil {
-			writeError(w, upstreamStatus(resolveErr), resolveErr.Error(), "upstream_error")
-			return
-		}
-		s.recordGeneratedMedia(r.Context(), value)
-		data = append(data, value)
+	data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n)
+	if err != nil {
+		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+		return
 	}
-	s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 
@@ -907,13 +839,9 @@ func sanitizedEgressLabel(raw string) string {
 	return parsed.Scheme + "://" + parsed.Hostname()
 }
 
-func (s *Server) videoFile(w http.ResponseWriter, r *http.Request) {
-	s.serveMediaFile(w, r, s.cfg.VideoDataDir, "video")
-}
-
 func (s *Server) serveMediaFile(w http.ResponseWriter, r *http.Request, root, kind string) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	if !protocol.ValidMediaFileID(id) {
+	if !mediaFileIDPattern.MatchString(id) {
 		writeError(w, http.StatusBadRequest, "invalid file ID", "invalid_request_error")
 		return
 	}
@@ -924,11 +852,7 @@ func (s *Server) serveMediaFile(w http.ResponseWriter, r *http.Request, root, ki
 			if !isWithin(root, path) {
 				continue
 			}
-			if kind == "video" {
-				w.Header().Set("Content-Type", "video/mp4")
-			} else {
-				w.Header().Set("Content-Type", mime.TypeByExtension(filepath.Ext(path)))
-			}
+			w.Header().Set("Content-Type", mime.TypeByExtension(filepath.Ext(path)))
 			http.ServeFile(w, r, path)
 			return
 		}
@@ -936,15 +860,8 @@ func (s *Server) serveMediaFile(w http.ResponseWriter, r *http.Request, root, ki
 	writeError(w, http.StatusNotFound, kind+" file not found", "not_found")
 }
 
-func mediaPools(modelName string) []string {
-	if modelName == "grok-imagine-image-lite" {
-		return []string{"basic", "super", "heavy"}
-	}
-	return []string{"super", "heavy"}
-}
-
 func isOpenAIImageModel(modelName string) bool {
-	return strings.EqualFold(strings.TrimSpace(modelName), "gpt-image-2")
+	return model.IsImageModel(modelName)
 }
 
 func validOpenAIImageSize(size string) bool {
@@ -967,36 +884,8 @@ func isOpenAIAccount(account accounts.Account) bool {
 	case "chatgpt_web", "oauth_login", "openai", "codex", "openai_oauth":
 		return true
 	}
-	// Older imports did not persist source_type. ChatGPT access tokens are JWTs;
-	// Grok SSO tokens are opaque values.
+	// Older imports did not persist source_type. ChatGPT access tokens are JWTs.
 	return strings.Count(strings.TrimSpace(account.Token), ".") == 2
-}
-
-func collectImageEvents(reader io.Reader) []provider.ImageResult {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), 4<<20)
-	results := make([]provider.ImageResult, 0, 2)
-	seen := map[string]bool{}
-	for scanner.Scan() {
-		kind, events := protocol.ParseSSELine(scanner.Text())
-		if kind == "done" {
-			break
-		}
-		for _, event := range events {
-			if event.Kind != "image" || event.Progress < 100 || event.Moderated {
-				continue
-			}
-			value := event.URL
-			if value == "" && event.AssetID != "" {
-				value = protocol.ResolveAssetReference(event.AssetID, "", "")
-			}
-			if value != "" && !seen[value] {
-				seen[value] = true
-				results = append(results, provider.ImageResult{URL: value})
-			}
-		}
-	}
-	return results
 }
 
 func requestPublicBase(r *http.Request) string {
@@ -1106,25 +995,16 @@ func cleanForwardedPrefix(value string) string {
 	return strings.TrimRight(value, "/")
 }
 
-func cookieUserID(account accounts.Account) string {
-	cookie := stringValue(account.Fields["cookie_header"])
-	if cookie == "" {
-		return ""
-	}
-	match := cookieUserIDPattern.FindStringSubmatch(cookie)
-	if len(match) == 2 {
-		return match[1]
-	}
-	return ""
-}
-
 func upstreamStatus(err error) int {
+	if errors.Is(err, context.Canceled) {
+		return 499
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusGatewayTimeout
 	}
-	var upstream *protocol.UpstreamError
-	if errors.As(err, &upstream) && upstream.Status >= 400 {
-		return upstream.Status
+	var upstreamErr *protocol.UpstreamError
+	if errors.As(err, &upstreamErr) && upstreamErr.Status > 0 {
+		return upstreamErr.Status
 	}
 	return http.StatusBadGateway
 }

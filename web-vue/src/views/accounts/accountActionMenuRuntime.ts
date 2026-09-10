@@ -3,8 +3,12 @@ import type { ActionMenuItem } from 'nanocat-ui'
 
 import { actionMenuGroups } from '@/components/ai/menuItems'
 import type { AccountBulkAction } from './accountBulkActionsRuntime'
-import type { AccountImportMode } from './accountImportRuntime'
-import type { AccountExportFormat } from './accountExportRuntime'
+import type { AccountExportFormat, AccountExportScope } from './accountExportRuntime'
+import {
+  ACCOUNT_IMPORT_MODE_CATALOG,
+  isAccountImportMode,
+  type AccountImportMode,
+} from './accountImportRuntime'
 
 type ReadableRef<T> = {
   readonly value: T
@@ -19,8 +23,6 @@ type AccountGroupBindOption = {
   value: string
 }
 
-type AccountExportScope = 'selected' | 'all'
-
 export type AccountActionMenuItem = ActionMenuItem & {
   children?: AccountActionMenuItem[]
 }
@@ -28,41 +30,30 @@ export type AccountActionMenuItem = ActionMenuItem & {
 type AccountActionMenuRuntimeOptions = {
   selectedCount: ReadableRef<number>
   accountAllTotal: ReadableRef<number>
+  accountMatchingTotal: ReadableRef<number>
+  allMatchingSelected: ReadableRef<boolean>
   accountGroupsLoading: ReadableRef<boolean>
   bindAccountGroupOptions: ReadableRef<readonly AccountGroupBindOption[]>
   selectedBindGroupId: WritableRef<string>
   openCreateModal: () => void
   openImportModal: (mode: AccountImportMode) => void
-  exportAccounts: (scope: AccountExportScope, format: AccountExportFormat) => Promise<void>
-  refreshAllAccounts: () => Promise<void>
-  extractSelectedCheckout: () => Promise<void>
+  exportAccounts: (scope: AccountExportScope, format?: AccountExportFormat) => Promise<void>
   runBulkAction: (action: AccountBulkAction) => Promise<void>
   bindSelectedAccountsToGroup: () => Promise<void>
+  selectAllAccounts: () => void
+  selectAllMatching: () => void
+  clearSelection: () => void
 }
 
 const BIND_ACCOUNT_GROUP_ACTION_PREFIX = 'bind_group:'
 
-const accountImportActions = new Set<AccountImportMode>([
-  'oauth_login',
-  'access_token',
-  'session_json',
-  'cpa_json',
-  'remote_cpa',
-  'sub2api',
-])
-
 const accountBulkActions = new Set<AccountBulkAction>([
-  'refresh',
-  'refresh_at',
-  'reset',
+  'sync',
+  'refresh-access-token',
   'enable',
   'disable',
   'delete',
 ])
-
-function isAccountImportAction(value: string): value is AccountImportMode {
-  return accountImportActions.has(value as AccountImportMode)
-}
 
 function isAccountBulkAction(value: string): value is AccountBulkAction {
   return accountBulkActions.has(value as AccountBulkAction)
@@ -102,98 +93,79 @@ export function useAccountActionMenuRuntime(options: AccountActionMenuRuntimeOpt
     [
       { key: 'create', label: '手动添加账号' },
     ],
-    [
-      { key: 'oauth_login', label: 'OAuth 登录已有账号' },
-      { key: 'access_token', label: '导入 Access Token' },
-      { key: 'session_json', label: '导入 Session JSON' },
-      { key: 'cpa_json', label: '导入 CPA JSON 文件' },
-      { key: 'remote_cpa', label: '从远程 CPA 服务器导入' },
-      { key: 'sub2api', label: '从 Sub2API 服务器导入' },
-    ],
+    ACCOUNT_IMPORT_MODE_CATALOG.map((item) => ({ key: item.value, label: item.label })),
   ))
 
-  const exportMenuItems = computed<AccountActionMenuItem[]>(() => actionMenuGroups<AccountActionMenuItem>(
+  const exportMenuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
     [
       {
-        key: 'selected',
-        label: `导出选中${options.selectedCount.value ? ` (${options.selectedCount.value})` : ''}`,
+        key: 'selected_json',
+        label: `选中账号 · 完整 JSON${options.selectedCount.value ? ` (${options.selectedCount.value})` : ''}`,
         disabled: options.selectedCount.value === 0,
-        children: [
-          { key: 'selected_sub2api', label: 'Sub2API 格式 (.json)' },
-          { key: 'selected_cpa', label: 'CPA 格式 (.zip)' },
-          { key: 'selected_agent_identity', label: 'Agent Identity (.zip)' },
-        ],
+      },
+      {
+        key: 'selected_txt',
+        label: '选中账号 · Access Token TXT',
+        disabled: options.selectedCount.value === 0,
       },
     ],
     [
       {
-        key: 'all',
-        label: '导出全部',
+        key: 'all_json',
+        label: '全部账号 · 完整 JSON',
         disabled: options.accountAllTotal.value === 0,
-        children: [
-          { key: 'all_sub2api', label: 'Sub2API 格式 (.json)' },
-          { key: 'all_cpa', label: 'CPA 格式 (.zip)' },
-          { key: 'all_agent_identity', label: 'Agent Identity (.zip)' },
-        ],
+      },
+      {
+        key: 'all_txt',
+        label: '全部账号 · Access Token TXT',
+        disabled: options.accountAllTotal.value === 0,
       },
     ],
   ))
 
   const batchMenuItems = computed<AccountActionMenuItem[]>(() => actionMenuGroups<AccountActionMenuItem>(
     [
-      { key: 'extract_checkout', label: '批量持续提链' },
-      { key: 'refresh_at', label: '协议登录批量刷新 AT' },
-      { key: 'refresh', label: '批量刷新账号信息和额度' },
-      { key: 'reset', label: '批量重置' },
+      {
+        key: 'select-all-accounts',
+        label: '全选账号',
+        disabled: options.accountAllTotal.value === 0 || options.selectedCount.value >= options.accountAllTotal.value,
+      },
+      {
+        key: 'select-all-matching',
+        label: '全选筛选',
+        disabled: options.accountMatchingTotal.value === 0 || options.allMatchingSelected.value,
+      },
+      {
+        key: 'clear-selection',
+        label: options.selectedCount.value ? `取消选择 (${options.selectedCount.value})` : '取消选择',
+        disabled: options.selectedCount.value === 0,
+      },
+    ],
+    [
+      { key: 'refresh-access-token', label: '批量刷新 AT', disabled: options.selectedCount.value === 0 },
+      { key: 'sync', label: '批量同步账号与额度', disabled: options.selectedCount.value === 0 },
     ],
     bindAccountGroupBatchItems.value,
     [
-      { key: 'enable', label: '批量启用' },
-      { key: 'disable', label: '批量禁用' },
-      { key: 'delete', label: '批量删除', danger: true },
+      { key: 'enable', label: '批量启用', disabled: options.selectedCount.value === 0 },
+      { key: 'disable', label: '批量禁用', disabled: options.selectedCount.value === 0 },
+      { key: 'delete', label: '批量删除', danger: true, disabled: options.selectedCount.value === 0 },
     ],
   ))
 
-  const toolbarBatchMenuItems = computed<AccountActionMenuItem[]>(() => {
-    const noSelection = options.selectedCount.value === 0
-    return actionMenuGroups<AccountActionMenuItem>(
-      [
-        {
-          key: 'refresh_all',
-          label: '刷新全部账号信息和额度',
-          disabled: options.accountAllTotal.value === 0,
-        },
-      ],
-      [
-        {
-          key: 'extract_checkout',
-          label: `持续提链选中账号${options.selectedCount.value ? ` (${options.selectedCount.value})` : ''}`,
-          disabled: noSelection,
-        },
-        {
-          key: 'refresh_at',
-          label: `协议登录刷新选中 AT${options.selectedCount.value ? ` (${options.selectedCount.value})` : ''}`,
-          disabled: noSelection,
-        },
-        {
-          key: 'refresh',
-          label: `刷新选中${options.selectedCount.value ? ` (${options.selectedCount.value})` : ''}`,
-          disabled: noSelection,
-        },
-        { key: 'reset', label: '重置选中状态', disabled: noSelection },
-      ],
-      bindAccountGroupBatchItems.value,
-      [
-        { key: 'enable', label: '启用选中', disabled: noSelection },
-        { key: 'disable', label: '禁用选中', disabled: noSelection },
-        { key: 'delete', label: '删除选中', disabled: noSelection, danger: true },
-      ],
-    )
-  })
+  const batchMenuLabel = '批量处理'
 
   async function handleBatchAction(action: string) {
-    if (action === 'extract_checkout') {
-      await options.extractSelectedCheckout()
+    if (action === 'select-all-accounts') {
+      options.selectAllAccounts()
+      return
+    }
+    if (action === 'select-all-matching') {
+      options.selectAllMatching()
+      return
+    }
+    if (action === 'clear-selection') {
+      options.clearSelection()
       return
     }
     if (action.startsWith(BIND_ACCOUNT_GROUP_ACTION_PREFIX)) {
@@ -206,37 +178,31 @@ export function useAccountActionMenuRuntime(options: AccountActionMenuRuntimeOpt
     }
   }
 
-  async function handleToolbarBatchAction(action: string) {
-    if (action === 'refresh_all') {
-      await options.refreshAllAccounts()
-      return
-    }
-    await handleBatchAction(action)
-  }
-
   function handleAccountEntryAction(key: string) {
     if (key === 'create') {
       options.openCreateModal()
       return
     }
-    if (isAccountImportAction(key)) {
+    if (isAccountImportMode(key)) {
       options.openImportModal(key)
     }
   }
 
   async function handleExportAction(key: string) {
-    const match = key.match(/^(selected|all)_(sub2api|cpa|agent_identity)$/)
+    const match = /^(selected|all)_(json|txt)$/.exec(key)
     if (!match) return
-    await options.exportAccounts(match[1] as AccountExportScope, match[2] as AccountExportFormat)
+    await options.exportAccounts(
+      match[1] as AccountExportScope,
+      match[2] as AccountExportFormat,
+    )
   }
 
   return {
     accountEntryItems,
     exportMenuItems,
     batchMenuItems,
-    toolbarBatchMenuItems,
+    batchMenuLabel,
     handleBatchAction,
-    handleToolbarBatchAction,
     handleAccountEntryAction,
     handleExportAction,
   }

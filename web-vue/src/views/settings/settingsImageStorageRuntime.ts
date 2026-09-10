@@ -2,6 +2,7 @@ import { ref } from 'vue'
 
 import { settingsApi, type ImageStorageTestResult } from '@/api/settings'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import { useOperationProgressRuntime } from '@/composables/useOperationProgressRuntime'
 import { useToast } from '@/composables/useToast'
 import { errorMessage } from '@/lib/errorMessage'
 
@@ -14,6 +15,8 @@ export function useSettingsImageStorageRuntime(options: SettingsImageStorageRunt
   const imageStorageTestResult = ref<ImageStorageTestResult | null>(null)
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
+  const progressRuntime = useOperationProgressRuntime()
+  const operationProgress = progressRuntime.state
 
   async function testImageStorageConnection() {
     if (!options.requireSavedSettings('测试 WebDAV')) return
@@ -52,11 +55,18 @@ export function useSettingsImageStorageRuntime(options: SettingsImageStorageRunt
     if (!confirmed) return
 
     imageStorageBusy.value = 'sync'
+    await progressRuntime.start({
+      title: '全量同步图片',
+      subtitle: '本地 → WebDAV',
+      message: '正在扫描并上传本地图片...',
+    })
     try {
       const response = await settingsApi.syncImageStorage()
-      toast.success(`同步完成：上传 ${response.result.uploaded}，跳过 ${response.result.skipped}，失败 ${response.result.failed}`)
+      const summary = `上传 ${response.result.uploaded}，跳过 ${response.result.skipped}，失败 ${response.result.failed}`
+      if (response.result.failed > 0) progressRuntime.warn(summary)
+      else progressRuntime.succeed(summary)
     } catch (error) {
-      toast.error(errorMessage(error, '同步图片失败'))
+      progressRuntime.fail(errorMessage(error, '同步图片失败'))
     } finally {
       imageStorageBusy.value = ''
     }
@@ -65,6 +75,8 @@ export function useSettingsImageStorageRuntime(options: SettingsImageStorageRunt
   return {
     imageStorageBusy,
     imageStorageTestResult,
+    operationProgress,
+    closeOperationProgress: progressRuntime.close,
     testImageStorageConnection,
     syncImageStorageFiles,
   }

@@ -1,22 +1,25 @@
-import { ref, type Ref } from 'vue'
+import { ref, type ComputedRef, type Ref } from 'vue'
 
-import { accountsApi, type Account } from '@/api/accounts'
+import { accountsApi, type Account, type AccountSelectionScope } from '@/api/accounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { saveBlob } from '@/lib/downloads'
 
-type AccountExportScope = 'selected' | 'all' | 'auto'
-export type AccountExportFormat = 'cpa' | 'sub2api' | 'agent_identity'
+export type AccountExportScope = 'selected' | 'all'
+export type AccountExportFormat = 'json' | 'txt'
 
 type AccountExportRuntimeOptions = {
   accounts: Ref<Account[]>
-  selectedIds: Ref<string[]>
+  selectedCount: ComputedRef<number>
+  selectionScope: ComputedRef<AccountSelectionScope>
+  scopedSelectionActive: ComputedRef<boolean>
   accountAllTotal: Ref<number>
   accountListTotal: Ref<number>
+  reconcileSelection: () => Promise<boolean>
   setError: (prefix: string, error: unknown, notify?: boolean) => void
 }
 
-function createExportFilename(format: AccountExportFormat, count = 0) {
+function createExportFilename(extension: AccountExportFormat) {
   const now = new Date()
   const parts = [
     now.getFullYear(),
@@ -27,11 +30,7 @@ function createExportFilename(format: AccountExportFormat, count = 0) {
     String(now.getMinutes()).padStart(2, '0'),
     String(now.getSeconds()).padStart(2, '0'),
   ]
-  if (format === 'cpa') return `codex-accounts-cpa-${parts.join('')}.zip`
-  if (format === 'agent_identity') {
-    return count === 1 ? 'auth.json' : `openai-agent-identities-${parts.join('')}.zip`
-  }
-  return `openai-accounts-sub2api-${parts.join('')}.json`
+  return `accounts-export-${parts.join('')}.${extension}`
 }
 
 export function useAccountExportRuntime(options: AccountExportRuntimeOptions) {
@@ -39,65 +38,39 @@ export function useAccountExportRuntime(options: AccountExportRuntimeOptions) {
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
 
-  async function exportAccounts(scope: AccountExportScope = 'auto', format: AccountExportFormat = 'sub2api') {
-    const formatLabel = format === 'cpa'
-      ? 'CPA ZIP'
-      : format === 'agent_identity' ? 'Agent Identity' : 'Sub2API JSON'
-    const targetIds = new Set(scope === 'all' ? [] : options.selectedIds.value)
-    if (scope === 'all' || (scope === 'auto' && targetIds.size === 0)) {
-      const totalHint = options.accountAllTotal.value || options.accountListTotal.value || options.accounts.value.length
-      if (!totalHint) {
-        toast.warning('暂无可导出的账号')
-        return
-      }
-      const confirmed = await confirmDialog.ask({
-        title: `导出全部账号为 ${formatLabel}`,
-        message: `即将导出全部 ${totalHint} 个账号。文件包含完整 OAuth 认证信息，请只在可信环境保存。`,
-        confirmText: '确认导出',
-        cancelText: '取消',
-      })
-      if (!confirmed) return
-
-      exportBusy.value = true
-      try {
-        const blob = await accountsApi.exportAccounts([], format)
-        saveBlob(blob, createExportFilename(format, totalHint))
-        toast.success(`已导出全部账号为 ${formatLabel}`)
-      } catch (error) {
-        options.setError('导出失败', error)
-      } finally {
-        exportBusy.value = false
-      }
-      return
-    }
-    if (scope === 'selected' && targetIds.size === 0) {
-      toast.warning('请先选择要导出的账号')
+  async function exportAccounts(
+    scope: AccountExportScope,
+    format: AccountExportFormat = 'json',
+  ) {
+    const exportAll = scope === 'all'
+    if (!exportAll && options.scopedSelectionActive.value && !await options.reconcileSelection()) return
+    const count = exportAll
+      ? (options.accountAllTotal.value || options.accountListTotal.value || options.accounts.value.length)
+      : options.selectedCount.value
+    if (!count) {
+      toast.warning(scope === 'selected' ? '请先选择要导出的账号' : '暂无可导出的账号')
       return
     }
 
-    const targetAccounts = targetIds.size
-      ? options.accounts.value.filter((item) => targetIds.has(item.id))
-      : options.accounts.value
-
-    if (!targetAccounts.length) {
-      toast.warning('暂无可导出的账号')
-      return
-    }
-
-    const exportScopeLabel = targetIds.size === 0 ? '全部' : '选中'
+    const formatLabel = format === 'json' ? '完整账号 JSON' : 'Access Token TXT'
+    const scopeLabel = exportAll ? '全部' : '选中'
     const confirmed = await confirmDialog.ask({
-      title: `导出${exportScopeLabel}账号为 ${formatLabel}`,
-      message: `即将导出${exportScopeLabel} ${targetAccounts.length} 个账号。文件包含完整 OAuth 认证信息，请只在可信环境保存。`,
-      confirmText: '确认导出',
+      title: `导出${scopeLabel}账号`,
+      message: format === 'json'
+        ? `即将把${scopeLabel} ${count} 个账号导出为可再次导入的完整 JSON。文件包含账号凭据和配置，请只在可信环境保存。`
+        : `即将把${scopeLabel} ${count} 个账号导出为 TXT，每行一个 Access Token，不包含 RT、ID Token 和账号配置。`,
+      confirmText: `导出 ${formatLabel}`,
       cancelText: '取消',
     })
     if (!confirmed) return
 
     exportBusy.value = true
     try {
-      const blob = await accountsApi.exportAccounts(targetAccounts.map((item) => item.id), format)
-      saveBlob(blob, createExportFilename(format, targetAccounts.length))
-      toast.success(`已导出 ${targetAccounts.length} 个账号为 ${formatLabel}`)
+      const target: AccountSelectionScope = exportAll ? { mode: 'all' } : options.selectionScope.value
+      const result = await accountsApi.exportAccounts(target, format)
+      saveBlob(result.blob, createExportFilename(format))
+      const skippedText = result.skipped > 0 ? `，跳过 ${result.skipped} 个` : ''
+      toast.success(`已导出 ${result.exported} 个账号${skippedText} · ${formatLabel}`)
     } catch (error) {
       options.setError('导出失败', error)
     } finally {

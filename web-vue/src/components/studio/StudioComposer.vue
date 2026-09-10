@@ -96,8 +96,19 @@
               <span>提示词</span>
             </StudioToolbarSelectButton>
 
+            <StudioToolbarSelectButton
+              v-if="mode === 'search'"
+              class="chat-search-skill-button"
+              :disabled="isSending"
+              title="搜索 Skill"
+              @click.stop="handleOpenSearchSkill"
+            >
+              <Icon icon="lucide:package-plus" class="h-3.5 w-3.5" />
+              <span>Skill</span>
+            </StudioToolbarSelectButton>
+
             <template v-if="mode === 'chat'">
-              <div class="chat-settings-anchor">
+              <div class="chat-settings-anchor chat-settings-anchor--chat">
                 <FloatingActionMenu
                   :label="chatSettingsLabel"
                   :items="chatSettingsMenuItems"
@@ -205,6 +216,27 @@
                 </div>
               </div>
             </template>
+
+            <template v-else-if="mode === 'file'">
+              <div class="chat-select-wrap chat-select-wrap--file">
+                <GroupedSelectMenu
+                  v-model="fileKindValue"
+                  :options="fileKindOptions"
+                  placement="top"
+                  selected-indicator="none"
+                  aria-label="选择文件类型"
+                />
+              </div>
+              <StudioToolbarSelectButton
+                class="chat-recent-file-tasks-button"
+                :disabled="isSending"
+                title="最近文件任务"
+                @click.stop="handleOpenRecentFileTasks"
+              >
+                <Icon icon="lucide:history" class="h-3.5 w-3.5" />
+                <span>最近</span>
+              </StudioToolbarSelectButton>
+            </template>
           </div>
 
           <div class="chat-input-submit-row">
@@ -224,11 +256,11 @@
               class="chat-input-send"
               :class="text.trim() && !isSending ? 'chat-input-send-ready' : 'chat-input-send-idle'"
               :disabled="isSending || !text.trim()"
-              :aria-label="mode === 'image' ? '提交图片任务' : '发送消息'"
+              :aria-label="submitAriaLabel"
               @click.stop
             >
               <Icon :icon="isSending ? 'lucide:loader-circle' : 'lucide:send-horizontal'" class="h-4 w-4" :class="{ 'animate-spin': isSending }" />
-              <span class="chat-input-send-label">{{ isEditing ? '保存' : '发送' }}</span>
+              <span class="chat-input-send-label">{{ submitLabel }}</span>
             </button>
           </div>
         </div>
@@ -248,7 +280,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
 import FloatingActionMenu from '@/components/ai/FloatingActionMenu.vue'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
+import { GroupedSelectMenu } from 'nanocat-ui'
 import StudioToolbarSelectButton from '@/components/studio/StudioToolbarSelectButton.vue'
 import {
   DEFAULT_IMAGE_SIZE,
@@ -258,7 +290,7 @@ import {
   resolveImageSizePresets,
   type ImageSizeResolution,
 } from '@/api/imageTasks'
-import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
+import type { StudioComposeMode, StudioFileKind, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
   active?: boolean
@@ -267,12 +299,14 @@ type ComposerMenuItem = ActionMenuItem & {
 
 const props = defineProps<{
   mode: StudioComposeMode
+  fileKind: StudioFileKind
   text: string
   chatModel: string
   chatReasoningEffort: string
   imageForm: StudioImageForm
   chatModelOptions: string[]
   imageModelOptions: string[]
+  imageHighResolutionEnabled: boolean
   references: StudioReference[]
   isSending: boolean
   isStreaming: boolean
@@ -281,6 +315,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:mode': [mode: StudioComposeMode]
+  'update:fileKind': [kind: StudioFileKind]
   'update:text': [text: string]
   'update:chatModel': [model: string]
   'update:chatReasoningEffort': [effort: string]
@@ -296,6 +331,8 @@ const emit = defineEmits<{
   'clear-references': []
   'preview-reference': [reference: StudioReference]
   'open-prompts': []
+  'open-search-skill': []
+  'open-recent-file-tasks': []
 }>()
 
 const composerShellRef = ref<HTMLElement | null>(null)
@@ -311,6 +348,12 @@ const modeOptions: Array<{ label: string; value: StudioComposeMode }> = [
   { label: '对话', value: 'chat' },
   { label: '画图', value: 'image' },
   { label: '搜索', value: 'search' },
+  { label: '文件', value: 'file' },
+]
+
+const fileKindOptions: Array<{ label: string; value: StudioFileKind }> = [
+  { label: 'PPT', value: 'ppt' },
+  { label: 'PSD', value: 'psd' },
 ]
 
 const textValue = computed({
@@ -335,10 +378,18 @@ const modeValue = computed({
   get: () => props.mode,
   set: (value: string | string[]) => {
     const next = String(Array.isArray(value) ? value[0] : value || props.mode)
-    if (next === 'chat' || next === 'search' || next === 'image') {
+    if (next === 'chat' || next === 'search' || next === 'image' || next === 'file') {
       closeFloatingMenus()
       emit('update:mode', next)
     }
+  },
+})
+
+const fileKindValue = computed({
+  get: () => props.fileKind,
+  set: (value: string | string[]) => {
+    const next = String(Array.isArray(value) ? value[0] : value || props.fileKind)
+    if (next === 'ppt' || next === 'psd') emit('update:fileKind', next)
   },
 })
 
@@ -365,7 +416,7 @@ const imageModelSelectOptions = computed(() => props.imageModelOptions.map((mode
   value: model,
 })))
 
-const sizePresets = computed(() => resolveImageSizePresets(props.imageForm.model))
+const sizePresets = computed(() => resolveImageSizePresets(props.imageHighResolutionEnabled))
 const selectedPreset = computed(() => sizePresets.value.find((preset) => preset.value === props.imageForm.size))
 const selectedRatio = computed(() => selectedPreset.value?.ratio || 'auto')
 const selectedResolution = computed(() => selectedPreset.value?.resolution || 'auto')
@@ -385,7 +436,7 @@ const resolutionOptions = computed(() => {
   return order.filter((value) => values.has(value)).map((value) => ({ label: value === 'auto' ? '自动' : value, value }))
 })
 const selectedSizeDetailLabel = computed(() => formatImageSizeLabel(props.imageForm.size))
-const canAttachReferences = computed(() => props.mode === 'image' || props.mode === 'chat')
+const canAttachReferences = computed(() => props.mode === 'image' || props.mode === 'chat' || props.mode === 'file')
 const selectedChatModelLabel = computed(() => chatModelSelectOptions.value.find((option) => option.value === props.chatModel)?.label || props.chatModel || '自动模型')
 const selectedReasoningEffortLabel = computed(() => {
   const current = props.chatReasoningEffort || 'default'
@@ -429,10 +480,26 @@ const imageSummaryLabel = computed(() => {
 })
 const imagePlaceholder = computed(() => props.references.length ? '描述你想如何修改参考图' : '输入你想生成的画面，也可以粘贴或拖入参考图')
 const chatPlaceholder = computed(() => props.references.length ? '描述你想让模型识别或分析的图片' : '输入消息，Enter 发送，Shift+Enter 换行')
+const filePlaceholder = computed(() => {
+  const kind = props.fileKind === 'psd' ? 'PSD' : 'PPT'
+  return props.references.length
+    ? `描述你想根据参考图生成的 ${kind}`
+    : `描述你想生成的 ${kind}，也可以粘贴或拖入参考图`
+})
 const placeholderText = computed(() => {
   if (props.mode === 'image') return imagePlaceholder.value
+  if (props.mode === 'file') return filePlaceholder.value
   if (props.mode === 'search') return '输入搜索问题，Enter 搜索，Shift+Enter 换行'
   return chatPlaceholder.value
+})
+const submitAriaLabel = computed(() => {
+  if (props.mode === 'image') return '提交图片任务'
+  if (props.mode === 'file') return `生成 ${props.fileKind === 'psd' ? 'PSD' : 'PPT'}`
+  return '发送消息'
+})
+const submitLabel = computed(() => {
+  if (props.isEditing) return '保存'
+  return props.mode === 'file' ? '生成' : '发送'
 })
 
 function toggleSettings() {
@@ -448,6 +515,16 @@ function closeFloatingMenus() {
 function handleOpenPrompts() {
   closeFloatingMenus()
   emit('open-prompts')
+}
+
+function handleOpenSearchSkill() {
+  closeFloatingMenus()
+  emit('open-search-skill')
+}
+
+function handleOpenRecentFileTasks() {
+  closeFloatingMenus()
+  emit('open-recent-file-tasks')
 }
 
 function handleAttachReferenceClick() {
@@ -472,9 +549,7 @@ function handleChatSettingsMenuSelect(key: string) {
 function compactModelLabel(model: string) {
   const normalized = String(model || '').trim()
   if (!normalized || normalized === 'auto') return '自动'
-  if (/^gpt-/i.test(normalized)) return `GPT ${normalized.replace(/^gpt-/i, '')}`
-  if (/^grok-/i.test(normalized)) return `Grok ${normalized.replace(/^grok-/i, '')}`
-  return normalized
+  return normalized.replace(/^gpt-/i, '')
 }
 
 function resizeTextarea() {
@@ -661,6 +736,7 @@ onBeforeUnmount(() => {
   background: hsl(var(--background));
   padding: 0.55rem;
   pointer-events: auto;
+  box-shadow: var(--shadow-elevated);
 }
 
 .chat-editing-bar {
@@ -758,6 +834,12 @@ onBeforeUnmount(() => {
 }
 
 .chat-select-wrap--mode {
+  flex: 0 0 auto;
+}
+
+.chat-select-wrap.chat-select-wrap--file {
+  min-width: 4.75rem;
+  max-width: 5.5rem;
   flex: 0 0 auto;
 }
 
@@ -1072,6 +1154,55 @@ onBeforeUnmount(() => {
 
   .attach-images {
     width: 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  .chat-input-actions {
+    gap: 0.375rem;
+  }
+
+  .chat-input-action-row {
+    gap: 0.25rem;
+  }
+
+  .chat-select-wrap {
+    min-width: 4.75rem;
+    max-width: 4.75rem;
+  }
+
+  .chat-summary-button,
+  :deep(.chat-summary-button) {
+    max-width: clamp(5.5rem, 25vw, 7rem);
+  }
+
+  :deep(.chat-prompt-button > span) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
+  :deep(.chat-prompt-button) {
+    width: 1.75rem;
+    justify-content: center;
+    padding-inline: 0;
+  }
+}
+
+@media (max-width: 360px) {
+  .chat-settings-anchor--chat {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  :deep(.chat-settings-anchor--chat > div),
+  :deep(.chat-settings-anchor--chat button) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
   }
 }
 </style>

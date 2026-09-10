@@ -1,7 +1,7 @@
 <template>
   <ModalShell
     :open="modal === 'create'"
-    max-width="34rem"
+    aria-label="创建用户密钥"
     :z-index="130"
     close-on-backdrop
     @close="$emit('close')"
@@ -28,7 +28,7 @@
 
   <ModalShell
     :open="modal === 'edit'"
-    max-width="34rem"
+    aria-label="编辑用户密钥"
     :z-index="130"
     close-on-backdrop
     @close="$emit('close')"

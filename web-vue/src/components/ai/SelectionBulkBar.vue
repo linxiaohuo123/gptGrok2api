@@ -66,7 +66,7 @@ const resolvedSummary = computed(() => props.summaryText || `已选择 ${props.s
 .selection-bulk-bar {
   display: flex;
   width: 100%;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -97,17 +97,17 @@ const resolvedSummary = computed(() => props.summaryText || `已选择 ${props.s
 
 .selection-bulk-bar__actions {
   min-width: 0;
+  flex-wrap: nowrap;
 }
 
 .selection-bulk-bar-enter-active,
 .selection-bulk-bar-leave-active {
-  transition: all 0.2s ease;
+  transition: opacity 0.16s ease;
 }
 
 .selection-bulk-bar-enter-from,
 .selection-bulk-bar-leave-to {
   opacity: 0;
-  transform: translateY(12px);
 }
 
 @media (max-width: 640px) {
@@ -117,6 +117,7 @@ const resolvedSummary = computed(() => props.summaryText || `已选择 ${props.s
   }
 
   .selection-bulk-bar {
+    flex-wrap: wrap;
     align-items: stretch;
     border-radius: var(--radius, 12px);
     padding: 12px;
@@ -124,6 +125,7 @@ const resolvedSummary = computed(() => props.summaryText || `已选择 ${props.s
 
   .selection-bulk-bar__actions {
     width: 100%;
+    flex-wrap: wrap;
   }
 }
 </style>

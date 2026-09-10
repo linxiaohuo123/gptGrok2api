@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（crypto、encoding/json、os、sync）
+// [OUTPUT]: 持久化：Store、Account*、Authenticate、Config、FlushAccounts
+// [POS]: 账号/密钥/配置三份 JSON 的唯一读写入口。请求主路径上的读操作不得写盘。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package store
 
 import (
@@ -36,6 +41,13 @@ type Store struct {
 	accountsRevision uint64
 	accountsDirty    bool
 	accountsTimer    *time.Timer
+	authKeysCache    []map[string]any
+	authKeysLoaded   bool
+	authKeysLoadedAt time.Time
+	authKeysDirty    bool
+	authKeysTimer    *time.Timer
+	configCache      map[string]any
+	configLoaded     bool
 }
 
 const accountRuntimeFlushDelay = time.Second
@@ -69,7 +81,10 @@ func (s *Store) SaveAccounts(items []map[string]any) error {
 	defer s.accountsWriteMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := normalizeAccountListJSON(items)
+	next := cloneAccountList(items)
+	for _, item := range next {
+		normalizeAccount(item)
+	}
 	if err := writeJSON(s.accountsPath, next); err != nil {
 		return err
 	}
@@ -98,43 +113,130 @@ func (s *Store) AccountSnapshot() ([]map[string]any, uint64, error) {
 }
 
 func (s *Store) LoadAuthKeys() ([]map[string]any, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return loadItems(s.authKeysPath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items, err := s.authKeysLocked()
+	if err != nil {
+		return nil, err
+	}
+	return cloneAccountList(items), nil
 }
 
 func (s *Store) SaveAuthKeys(items []map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeJSON(s.authKeysPath, map[string]any{"items": items})
+	return s.saveAuthKeysLocked(items)
+}
+
+// ── 鉴权密钥缓存 ──────────────────────────────────────────────
+// 鉴权在请求主路径上：原实现每次都要读盘、改写 last_used_at、再 fsync 回盘，
+// 而且全程持有 Store 写锁，把账号快照的读者一起堵在门外。
+// 现在读盘最多每 authKeysCacheTTL 一次（外部改文件仍能及时生效），
+// last_used_at 只改内存，延迟合并落盘。
+const (
+	authKeysCacheTTL  = 2 * time.Second
+	authKeyFlushDelay = time.Second
+)
+
+func (s *Store) authKeysLocked() ([]map[string]any, error) {
+	if s.authKeysLoaded && time.Since(s.authKeysLoadedAt) <= authKeysCacheTTL {
+		return s.authKeysCache, nil
+	}
+	items, err := loadItems(s.authKeysPath)
+	if err != nil {
+		return nil, err
+	}
+	s.authKeysCache, s.authKeysLoaded, s.authKeysLoadedAt = items, true, time.Now()
+	return s.authKeysCache, nil
+}
+
+func (s *Store) saveAuthKeysLocked(items []map[string]any) error {
+	if err := writeJSON(s.authKeysPath, map[string]any{"items": items}); err != nil {
+		return err
+	}
+	s.authKeysCache, s.authKeysLoaded, s.authKeysLoadedAt = items, true, time.Now()
+	s.authKeysDirty = false
+	return nil
+}
+
+func (s *Store) scheduleAuthKeyFlushLocked() {
+	if s.authKeysTimer != nil {
+		return
+	}
+	s.authKeysTimer = time.AfterFunc(authKeyFlushDelay, s.flushAuthKeys)
+}
+
+func (s *Store) FlushAuthKeys() {
+	s.flushAuthKeys()
+}
+
+func (s *Store) flushAuthKeys() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authKeysTimer = nil
+	if !s.authKeysDirty {
+		return
+	}
+	s.authKeysDirty = false
+	_ = writeJSON(s.authKeysPath, map[string]any{"items": s.authKeysCache})
 }
 
 func (s *Store) Config() (map[string]any, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return loadMap(s.configPath)
+	if s.configLoaded {
+		defer s.mu.RUnlock()
+		return CloneMap(s.configCache), nil
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.configLoaded {
+		return CloneMap(s.configCache), nil
+	}
+	current, err := loadMap(s.configPath)
+	if err != nil {
+		return nil, err
+	}
+	s.configCache = current
+	s.configLoaded = true
+	return CloneMap(current), nil
 }
 
 func (s *Store) UpdateConfig(key string, value any) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, err := loadMap(s.configPath)
-	if err != nil {
-		return nil, err
+	var current map[string]any
+	var err error
+	if s.configLoaded {
+		current = s.configCache
+	} else {
+		current, err = loadMap(s.configPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	current[key] = value
 	if err := writeJSON(s.configPath, current); err != nil {
 		return nil, err
 	}
-	return current, nil
+	s.configCache = current
+	s.configLoaded = true
+	return CloneMap(current), nil
 }
 
 func (s *Store) MutateConfig(key string, mutate func(any) (any, error)) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, err := loadMap(s.configPath)
-	if err != nil {
-		return nil, err
+	var current map[string]any
+	var err error
+	if s.configLoaded {
+		current = s.configCache
+	} else {
+		current, err = loadMap(s.configPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	next, err := mutate(current[key])
 	if err != nil {
@@ -144,13 +246,20 @@ func (s *Store) MutateConfig(key string, mutate func(any) (any, error)) (map[str
 	if err := writeJSON(s.configPath, current); err != nil {
 		return nil, err
 	}
-	return current, nil
+	s.configCache = current
+	s.configLoaded = true
+	return CloneMap(current), nil
 }
 
 func (s *Store) ReplaceConfig(value map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeJSON(s.configPath, value)
+	if err := writeJSON(s.configPath, value); err != nil {
+		return err
+	}
+	s.configCache = CloneMap(value)
+	s.configLoaded = true
+	return nil
 }
 
 func (s *Store) Authenticate(token string) (Identity, bool) {
@@ -163,7 +272,7 @@ func (s *Store) Authenticate(token string) (Identity, bool) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	items, err := loadItems(s.authKeysPath)
+	items, err := s.authKeysLocked()
 	if err != nil {
 		return Identity{}, false
 	}
@@ -175,19 +284,20 @@ func (s *Store) Authenticate(token string) (Identity, bool) {
 		if subtle.ConstantTimeCompare([]byte(candidate), []byte(strings.TrimSpace(stored))) != 1 {
 			continue
 		}
-		now := time.Now().UTC().Format(time.RFC3339)
-		item["last_used_at"] = now
+		// last_used_at 是遥测而非鉴权依据：只改内存，合并落盘。
+		item["last_used_at"] = time.Now().UTC().Format(time.RFC3339)
 		items[index] = item
-		_ = writeJSON(s.authKeysPath, map[string]any{"items": items})
+		s.authKeysDirty = true
+		s.scheduleAuthKeyFlushLocked()
 		return identityFromItem(item), true
 	}
 	return Identity{}, false
 }
 
 func (s *Store) ListPublicKeys(role string) ([]map[string]any, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	items, err := loadItems(s.authKeysPath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items, err := s.authKeysLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +319,7 @@ func (s *Store) CreateKey(role, name, adminKey string) (map[string]any, string, 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	items, err := loadItems(s.authKeysPath)
+	items, err := s.authKeysLocked()
 	if err != nil {
 		return nil, "", err
 	}
@@ -237,7 +347,7 @@ func (s *Store) CreateKey(role, name, adminKey string) (map[string]any, string, 
 		"last_used_at": nil,
 	}
 	items = append(items, item)
-	if err := writeJSON(s.authKeysPath, map[string]any{"items": items}); err != nil {
+	if err := s.saveAuthKeysLocked(items); err != nil {
 		return nil, "", err
 	}
 	return publicKey(item), rawKey, nil
@@ -246,7 +356,7 @@ func (s *Store) CreateKey(role, name, adminKey string) (map[string]any, string, 
 func (s *Store) UpdateKey(id, role string, updates map[string]any, adminKey string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	items, err := loadItems(s.authKeysPath)
+	items, err := s.authKeysLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +367,7 @@ func (s *Store) UpdateKey(id, role string, updates map[string]any, adminKey stri
 		if role != "" && strings.ToLower(stringValue(item["role"])) != strings.ToLower(role) {
 			return nil, os.ErrNotExist
 		}
-		next := cloneMap(item)
+		next := CloneMap(item)
 		if value, ok := updates["name"]; ok {
 			next["name"] = uniqueNameExcluding(items, stringValue(value), stringValue(item["role"]), id)
 		}
@@ -275,7 +385,7 @@ func (s *Store) UpdateKey(id, role string, updates map[string]any, adminKey stri
 			next["key_hash"] = hashKey(rawKey)
 		}
 		items[index] = next
-		if err := writeJSON(s.authKeysPath, map[string]any{"items": items}); err != nil {
+		if err := s.saveAuthKeysLocked(items); err != nil {
 			return nil, err
 		}
 		return publicKey(next), nil
@@ -286,7 +396,7 @@ func (s *Store) UpdateKey(id, role string, updates map[string]any, adminKey stri
 func (s *Store) DeleteKey(id, role string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	items, err := loadItems(s.authKeysPath)
+	items, err := s.authKeysLocked()
 	if err != nil {
 		return err
 	}
@@ -306,7 +416,7 @@ func (s *Store) DeleteKey(id, role string) error {
 	if !removed {
 		return os.ErrNotExist
 	}
-	return writeJSON(s.authKeysPath, map[string]any{"items": filtered})
+	return s.saveAuthKeysLocked(filtered)
 }
 
 func (s *Store) AccountList() ([]map[string]any, error) {
@@ -338,7 +448,7 @@ func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, in
 			skipped++
 			continue
 		}
-		item := cloneMap(payload)
+		item := CloneMap(payload)
 		normalizeAccount(item)
 		accounts = append(accounts, item)
 		byToken[token] = len(accounts) - 1
@@ -368,7 +478,6 @@ func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, in
 		if err := writeJSON(s.accountsPath, accounts); err != nil {
 			return 0, 0, nil, err
 		}
-		accounts = normalizeAccountListJSON(accounts)
 		s.replaceAccountsLocked(accounts)
 		s.accountsDirty = false
 	}
@@ -426,7 +535,7 @@ func (s *Store) UpdateAccount(token string, updates map[string]any) (map[string]
 	}
 	s.replaceAccountsLocked(accounts)
 	s.accountsDirty = false
-	result := cloneMap(next)
+	result := CloneMap(next)
 	for key, value := range updates {
 		result[key] = value
 	}
@@ -449,7 +558,7 @@ func (s *Store) UpdateAccountRuntime(token string, updates map[string]any) (map[
 	s.replaceAccountsLocked(accounts)
 	s.accountsDirty = true
 	s.scheduleAccountFlushLocked(accountRuntimeFlushDelay)
-	result := cloneMap(next)
+	result := CloneMap(next)
 	for key, value := range updates {
 		result[key] = value
 	}
@@ -466,7 +575,7 @@ func (s *Store) FlushAccounts() error {
 // the lookup key. Keeping this operation in Store avoids a race between a
 // refresh-token rotation and another concurrent account update.
 func (s *Store) RotateAccountTokens(oldToken, newToken, refreshToken, idToken string, fields map[string]any) (map[string]any, []map[string]any, error) {
-	updates := cloneMap(fields)
+	updates := CloneMap(fields)
 	if strings.TrimSpace(newToken) != "" {
 		updates["access_token"] = strings.TrimSpace(newToken)
 	}
@@ -529,11 +638,11 @@ func (s *Store) updatedAccountsLocked(token string, updates map[string]any) ([]m
 		return nil, nil, false
 	}
 	accounts := append([]map[string]any(nil), s.accountsCache...)
-	next := cloneMap(accounts[index])
+	next := CloneMap(accounts[index])
 	for key, value := range updates {
 		next[key] = value
 	}
-	next = normalizeAccountMapJSON(next)
+	normalizeAccount(next)
 	accounts[index] = next
 	return accounts, next, true
 }
@@ -590,7 +699,7 @@ func accountIndex(items []map[string]any) map[string]int {
 func cloneAccountList(items []map[string]any) []map[string]any {
 	cloned := make([]map[string]any, len(items))
 	for i, item := range items {
-		cloned[i] = cloneMap(item)
+		cloned[i] = CloneMap(item)
 	}
 	return cloned
 }
@@ -598,11 +707,11 @@ func cloneAccountList(items []map[string]any) []map[string]any {
 func normalizeAccountMapJSON(item map[string]any) map[string]any {
 	raw, err := json.Marshal(item)
 	if err != nil {
-		return cloneMap(item)
+		return CloneMap(item)
 	}
 	var normalized map[string]any
 	if json.Unmarshal(raw, &normalized) != nil {
-		return cloneMap(item)
+		return CloneMap(item)
 	}
 	return normalized
 }
@@ -819,7 +928,10 @@ func accountToken(item map[string]any) string {
 	if token := stringValue(item["access_token"]); token != "" {
 		return token
 	}
-	return stringValue(item["accessToken"])
+	if token := stringValue(item["accessToken"]); token != "" {
+		return token
+	}
+	return stringValue(item["token"])
 }
 
 func normalizeAccount(item map[string]any) {
@@ -840,14 +952,20 @@ func normalizeAccount(item map[string]any) {
 	if _, ok := item["created_at"]; !ok {
 		item["created_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
-}
-
-func cloneMap(input map[string]any) map[string]any {
-	output := make(map[string]any, len(input))
-	for key, value := range input {
-		output[key] = value
+	for k, v := range item {
+		switch n := v.(type) {
+		case int:
+			item[k] = float64(n)
+		case int64:
+			item[k] = float64(n)
+		case int32:
+			item[k] = float64(n)
+		case uint:
+			item[k] = float64(n)
+		case uint64:
+			item[k] = float64(n)
+		}
 	}
-	return output
 }
 
 func stringValue(value any) string {

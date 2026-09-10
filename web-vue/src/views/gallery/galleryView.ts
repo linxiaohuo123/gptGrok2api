@@ -1,12 +1,10 @@
-import type { GalleryFile, ImageCleanupTargetResult, ImageCompressResult, ImageStorageStats } from '@/api/gallery'
+import type { GalleryFile, ImageStorageStats } from '@/api/gallery'
 
 export const galleryPageSizeOptions = [24, 48, 96] as const
 
 type GalleryCounts = {
   all: number
   image: number
-  video: number
-  music: number
 }
 
 type GalleryMetricItem = {
@@ -22,11 +20,6 @@ type GalleryStorageItem = {
   value: string
 }
 
-type GalleryCleanupExpiredResult = {
-  deleted?: number
-  message?: string
-}
-
 export type GalleryFileCardSignatureInput = {
   selected: boolean
   previewable: boolean
@@ -36,6 +29,8 @@ export type GalleryFileCardSignatureInput = {
   sizeLabel: string
   dimensions: string
   timeRemaining: string
+  genboxPushEnabled: boolean
+  genboxBusy: boolean
 }
 
 function signatureValue(value: unknown): string {
@@ -79,6 +74,10 @@ export function storageLabel(file: GalleryFile): string {
   return '本地'
 }
 
+export function genboxStatusLabel(file: GalleryFile): string {
+  return file.genbox_push?.label || ''
+}
+
 export function galleryFileCardSignature(file: GalleryFile, input: GalleryFileCardSignatureInput): string {
   return [
     file.path,
@@ -92,12 +91,15 @@ export function galleryFileCardSignature(file: GalleryFile, input: GalleryFileCa
     input.sizeLabel,
     input.dimensions,
     input.timeRemaining,
+    input.genboxPushEnabled ? 1 : 0,
+    input.genboxBusy ? 1 : 0,
+    file.genbox_push ? `${file.genbox_push.status}:${file.genbox_push.updated_at}` : '',
     file.tags.map((tag) => boundedSignatureText(tag, 64)).join(','),
   ].map(signatureValue).join('|')
 }
 
 export function canPreviewFile(file: GalleryFile, brokenPaths: ReadonlySet<string>): boolean {
-  return file.size > 128 && !brokenPaths.has(file.path)
+  return file.available && !brokenPaths.has(file.path)
 }
 
 export function parseTags(value: string): string[] {
@@ -144,32 +146,6 @@ export function buildStorageSummaryItems(
     { label: '图库文件', value: `${stats ? stats.image_count : counts.all} 个` },
     { label: '当前筛选结果', value: `${totalItems} 个 / ${formatSize(totalSize)}` },
   ]
-}
-
-export function formatCompressStorageMessage(result: ImageCompressResult): string {
-  return `压缩完成：处理 ${Number(result.compressed || 0)} 张，节省 ${formatSize(Number(result.saved_bytes || 0))}。`
-}
-
-export function formatCleanupExpiredMessage(result: GalleryCleanupExpiredResult): string {
-  return result.message || `已清理 ${Number(result.deleted || 0)} 张过期图片。`
-}
-
-export function formatCleanupTargetMessage(
-  result: ImageCleanupTargetResult,
-  options: { dryRun: boolean; normalizedTarget: number },
-): string {
-  const removed = Number(result.removed || 0)
-  const freedLabel = formatMb(Number(result.freed_mb || 0))
-  const currentLabel = formatMb(Number(result.current_free_mb || 0))
-  const targetLabel = formatMb(Number(result.target_free_mb || options.normalizedTarget))
-  if (options.dryRun) {
-    return removed > 0
-      ? `预估会清理 ${removed} 张，预计释放 ${freedLabel}。当前剩余 ${currentLabel} / 目标 ${targetLabel}。`
-      : `无需清理：当前剩余 ${currentLabel}，已达到目标 ${targetLabel}。`
-  }
-  return removed > 0
-    ? `已清理 ${removed} 张，释放 ${freedLabel}。当前剩余 ${currentLabel} / 目标 ${targetLabel}。`
-    : `没有需要清理的图片。当前剩余 ${currentLabel} / 目标 ${targetLabel}。`
 }
 
 export function buildGalleryMetricItems(

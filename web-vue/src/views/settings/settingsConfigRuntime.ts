@@ -41,8 +41,8 @@ function formatBytes(value: unknown): string {
 
 function cleanupRequest(settings: Settings): RetentionCleanupRequest {
   return {
-    log_retention_days: settings.log_retention_days,
-    image_retention_days: settings.image_retention_days,
+    log_retention_hours: settings.log_retention_hours,
+    image_retention_hours: settings.image_retention_hours,
   }
 }
 
@@ -64,8 +64,8 @@ function hasAccountCleanupTargets(result: AccountCleanupResult): boolean {
 function retentionCleanupMessage(result: RetentionCleanupResult): string {
   return [
     `按当前保留策略检测到 ${result.total_removed} 项可清理数据，预计释放 ${formatBytes(result.total_size_bytes)}。`,
-    `日志：${result.logs.removed || 0} 条，保留 ${result.logs.retention_days} 天。`,
-    `图片：${result.images.removed || 0} 个，保留 ${result.images.retention_days} 天。`,
+    `日志：${result.logs.removed || 0} 条，保留 ${result.logs.retention_hours} 小时。`,
+    `图片：${result.images.removed || 0} 个，保留 ${result.images.retention_hours} 小时。`,
     '是否立即删除这些过期数据？',
   ].join('\n')
 }
@@ -77,7 +77,7 @@ function cleanupDoneMessage(result: RetentionCleanupResult): string {
 function accountCleanupMessage(result: AccountCleanupResult): string {
   return [
     `按当前账号策略检测到 ${result.total_removed} 个可移除账号。`,
-    `异常账号：${result.invalid || 0} 个。`,
+    `确认鉴权失效账号：${result.invalid || 0} 个。`,
     `额度耗尽账号：${result.rate_limited || 0} 个。`,
     '是否立即移除这些账号？正常账号不会受影响。',
   ].join('\n')
@@ -141,10 +141,15 @@ export function useSettingsConfigRuntime(options: SettingsConfigRuntimeOptions) 
   }
 
   async function persistSettings(showToast = false) {
-    if (!localSettings.value) return null
+    if (!localSettings.value) {
+      throw new Error('设置尚未加载，请刷新设置后重试')
+    }
+    if (!savedSettingsBaseline.value) {
+      throw new Error('设置基线尚未加载，请刷新设置后重试')
+    }
     const payload = prepareSettingsPatch(localSettings.value, savedSettingsBaseline.value)
     const result = await settingsStore.updateSettingsPatch(payload)
-    if (result.config) applySettings(result.config, false)
+    applySettings(result.settings, false)
     await options.afterSave?.()
     if (showToast) toast.success('设置保存成功')
     return result
@@ -238,6 +243,21 @@ export function useSettingsConfigRuntime(options: SettingsConfigRuntimeOptions) 
       await offerAccountCleanup()
       await offerRetentionCleanup()
     } catch (error) {
+      if ((error as { status?: number })?.status === 409) {
+        let revisionRefreshed = false
+        try {
+          await settingsStore.loadSettings()
+          revisionRefreshed = true
+        } catch {
+          // Keep the local edits even when the follow-up refresh fails.
+        }
+        toast.warning(
+          revisionRefreshed
+            ? '配置已被其他操作更新，当前编辑已保留；已刷新版本，请确认后再次保存'
+            : '配置已被其他操作更新，当前编辑已保留；刷新版本失败，请手动刷新后重试',
+        )
+        return
+      }
       toast.error(errorMessage(error, '保存失败'))
     } finally {
       isSaving.value = false

@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（encoding/json、os、sync）
+// [OUTPUT]: JSON 文件队列：New、Queue、Submit/Get/Cancel/List、worker
+// [POS]: 文件队列实现。离开锁的 *Task 必须是 clone 快照；损坏文件留档不覆盖。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package tasks
 
 import (
@@ -5,6 +10,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -42,7 +49,16 @@ type QueueAPI interface {
 
 func New(path string) *Queue {
 	q := &Queue{path: path, items: map[string]*Task{}, wake: make(chan struct{}, 1), handlers: map[string]func(*Task) (map[string]any, error){}}
-	_ = q.load()
+	if err := q.load(); err != nil {
+		// 绝不静默：读不出来的文件先留档，否则下一次 Submit 的原子替换
+		// 会把全部历史任务无声抹掉。
+		backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+		if renameErr := os.Rename(path, backup); renameErr == nil {
+			log.Printf("task queue file unreadable, kept as %s: %v", backup, err)
+		} else {
+			log.Printf("task queue file unreadable and could not be kept: %v", err)
+		}
+	}
 	return q
 }
 
@@ -69,9 +85,11 @@ func (q *Queue) Submit(kind string, payload map[string]any) *Task {
 	q.mu.Lock()
 	q.items[task.ID] = task
 	_ = q.saveLocked()
+	// 快照必须在锁内取：worker 一旦拿到这个指针就会写 Status/UpdatedAt。
+	snapshot := clone(task)
 	q.mu.Unlock()
 	q.signal()
-	return clone(task)
+	return snapshot
 }
 
 func (q *Queue) Get(id string) (Task, bool) {
@@ -137,7 +155,8 @@ func (q *Queue) worker() {
 			<-q.wake
 			continue
 		}
-		result, err := handler(selected)
+		// handler 只拿快照：活指针一旦出锁，Get/List/Cancel 的克隆就会与它并发读写。
+		result, err := handler(clone(selected))
 		q.mu.Lock()
 		if current, ok := q.items[selected.ID]; ok && current.Status == "running" {
 			current.UpdatedAt = time.Now().Unix()
@@ -170,8 +189,8 @@ func (q *Queue) load() error {
 		return err
 	}
 	var items []Task
-	if json.Unmarshal(raw, &items) != nil {
-		return nil
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return fmt.Errorf("decode queue file %s: %w", q.path, err)
 	}
 	for _, task := range items {
 		if task.Status == "running" {
@@ -209,21 +228,43 @@ func (q *Queue) saveLocked() error {
 	}
 	return os.Rename(name, q.path)
 }
+
+// clone 深拷贝一份任务。
+//
+// Payload / Result 是任意 JSON，这里必须**递归**复制：只重建顶层 map 的话，
+// 嵌套的 map 与 slice 仍与队列内的原件共享内存——而 clone 的用途正是
+// 把任务交给 handler 独占使用，handler 改一个嵌套值就会改到队列里的原件。
 func clone(task *Task) *Task {
 	copy := *task
-	if task.Payload != nil {
-		copy.Payload = map[string]any{}
-		for key, value := range task.Payload {
-			copy.Payload[key] = value
-		}
-	}
-	if task.Result != nil {
-		copy.Result = map[string]any{}
-		for key, value := range task.Result {
-			copy.Result[key] = value
-		}
-	}
+	copy.Payload = cloneJSONMap(task.Payload)
+	copy.Result = cloneJSONMap(task.Result)
 	return &copy
+}
+
+func cloneJSONMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = cloneJSONValue(value)
+	}
+	return output
+}
+
+func cloneJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneJSONMap(typed)
+	case []any:
+		items := make([]any, len(typed))
+		for index, item := range typed {
+			items[index] = cloneJSONValue(item)
+		}
+		return items
+	default:
+		return value
+	}
 }
 func taskID() string {
 	raw := make([]byte, 12)

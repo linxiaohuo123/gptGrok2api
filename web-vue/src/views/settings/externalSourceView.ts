@@ -13,7 +13,6 @@ export type Sub2APIForm = {
   password: string
   api_key: string
   group_id: string
-  verify_tls: boolean
 }
 
 export function createCPAForm(pool?: CPAPool | null): CPAForm {
@@ -32,7 +31,6 @@ export function createSub2APIForm(server?: Sub2APIServer | null): Sub2APIForm {
     password: '',
     api_key: '',
     group_id: server?.group_id || '',
-    verify_tls: server?.verify_tls !== false,
   }
 }
 
@@ -52,7 +50,6 @@ export function buildSub2APIPayload(form: Sub2APIForm): Sub2APIForm {
     password: form.password,
     api_key: form.api_key.trim(),
     group_id: form.group_id.trim(),
-    verify_tls: form.verify_tls,
   }
 }
 

@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（crypto/aes、encoding/json）
+// [OUTPUT]: OAuth 凭据存储：NewStore、List、Import
+// [POS]: **当前无调用点**。接线前必须补空 secret 校验。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package oauth
 
 import (

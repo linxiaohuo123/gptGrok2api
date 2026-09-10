@@ -1,98 +1,46 @@
 import apiClient from './client'
 
-export type MonitorMetricMap = Record<string, number>
+export type MonitorTone = 'success' | 'danger' | 'warning' | 'info' | 'muted'
 
-export interface RealtimeMonitorImage {
-  index?: number
-  total?: number
-  stage?: string
-  stage_label?: string
-  status?: string
-  returned_result?: boolean
-  returned_message?: boolean
-  metrics?: MonitorMetricMap
-  proxy_source?: string
-  proxy_hash?: string
-  egress_key?: string
-  egress_label?: string
-  proxy_group_id?: string
-  proxy_node_id?: string
-  proxy_node_name?: string
-  image_egress_limit?: number
-  has_proxy?: boolean
-  egress_mode?: string
-  local_reason?: string
-  error?: string
-  raw_error?: string
-  upstream_error?: string
-  upstream_message?: string
+export interface MonitorSlowMetric {
+  key: string
+  label: string
+  value_ms: number
+  value_text: string
+  important: boolean
+}
+
+export interface MonitorRecordPresentation {
+  status_label: string
+  status_tone: MonitorTone
+  stage_text: string
+  error_text: string
+  duration_text: string
+  metric_digest: string
+  egress_text: string
+  account_attempt_text: string
+  account_egress_text: string
+  tracked_duration_ms: number
+  untracked_duration_ms: number
+  slow_metrics: MonitorSlowMetric[]
+  slow_reason_code: string
+  slow_reason: string
 }
 
 export interface RealtimeMonitorRecord {
   call_id: string
+  status?: string
   endpoint?: string
   model?: string
-  summary?: string
-  role?: string
-  key_name?: string
-  status?: string
-  stage?: string
-  stage_label?: string
-  started_at?: string
   ended_at?: string
   updated_at?: string
-  elapsed_ms?: number
-  stage_elapsed_ms?: number
-  duration_ms?: number
-  metrics?: MonitorMetricMap
-  perf?: MonitorMetricMap
-  images?: Record<string, RealtimeMonitorImage>
   account_email?: string
-  conversation_id?: string
-  error?: string
-  raw_error?: string
-  upstream_error?: string
-  upstream_message?: string
-  url_count?: number
-  proxy_source?: string
-  proxy_hash?: string
-  egress_key?: string
-  egress_label?: string
-  proxy_group_id?: string
-  proxy_node_id?: string
-  proxy_node_name?: string
-  image_egress_limit?: number
-  has_proxy?: boolean
-  egress_mode?: string
-  local_reason?: string
+  previous_account_email?: string
+  presentation: MonitorRecordPresentation
 }
 
-export interface RealtimeMonitorSummary {
-  active: number
-  completed: number
-  success: number
-  failed: number
-  success_rate: number
-  avg_duration_ms: number
-  p95_duration_ms: number
-  metric_p95: MonitorMetricMap
-  slow_counts: {
-    handler_queue: number
-    stream_first_queue: number
-    account_wait: number
-    egress_wait: number
-    total_over_120s: number
-    local_reject_or_busy: number
-  }
-  bottleneck: {
-    key: string
-    label: string
-    value_ms: number
-  }
-  by_model: Record<string, number>
-  active_by_model: Record<string, number>
-  active_by_egress?: Record<string, number>
-  active_by_stage?: Record<string, number>
+export interface RealtimeMonitorRecordDetail extends RealtimeMonitorRecord {
+  events: RealtimeMonitorEvent[]
 }
 
 export interface RealtimeMonitorEvent {
@@ -100,35 +48,59 @@ export interface RealtimeMonitorEvent {
   call_id: string
   event: string
   label: string
+  detail_text: string
   model?: string
-  index?: number
-  total?: number
+  timing_text: string
+  account_email?: string
+  previous_account_email?: string
   status?: string
-  [key: string]: unknown
+  public_error?: string
+  error?: string
+  switched_account?: boolean
+}
+
+export interface MonitorStageCount {
+  label: string
+  count: number
+}
+
+export interface MonitorDiagnosticItem {
+  key: string
+  label: string
+  value: string | number
+  meta: string
+  tone: MonitorTone
+}
+
+export interface MonitorDiagnosticGroup {
+  key: string
+  title: string
+  meta: string
+  items: MonitorDiagnosticItem[]
 }
 
 export interface RealtimeMonitorResponse {
+  schema_version: 1
   updated_at: string
   threadpool: {
     tokens: number
-    previous_tokens: number
   }
-  window: {
-    completed: number
-    completed_capacity: number
-    events: number
-    event_capacity: number
-  }
-  summary: RealtimeMonitorSummary
   active: RealtimeMonitorRecord[]
   recent: RealtimeMonitorRecord[]
   slow: RealtimeMonitorRecord[]
-  events: RealtimeMonitorEvent[]
-  metric_labels: Record<string, string>
+  completed_window_text: string
+  entry_queue_text: string
+  active_stage_items: MonitorStageCount[]
+  diagnostic_groups: MonitorDiagnosticGroup[]
 }
 
 export const monitorApi = {
   realtime() {
     return apiClient.get<never, RealtimeMonitorResponse>('/api/monitor/realtime')
+  },
+  detail(callId: string) {
+    return apiClient.get<never, RealtimeMonitorRecordDetail>(
+      `/api/monitor/realtime/${encodeURIComponent(String(callId || '').trim())}`,
+    )
   },
 }

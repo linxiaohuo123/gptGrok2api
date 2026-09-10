@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（os、net/http、sync）
+// [OUTPUT]: 上游路由：NewUpstreamRouter、Resolve、Snapshot
+// [POS]: upstreams.txt 的解析与轮询选择；刷新在后台进行。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package proxy
 
 import (
@@ -153,8 +158,8 @@ func (r *UpstreamRouter) refresh() {
 		if candidate == "" || strings.HasPrefix(candidate, "#") || strings.HasPrefix(candidate, "//") {
 			continue
 		}
-		normalized := normalizeURL(candidate)
-		if normalized == "" {
+		normalized, err := normalizeURL(candidate)
+		if err != nil || normalized == "" {
 			continue
 		}
 		key := strings.ToLower(normalized)

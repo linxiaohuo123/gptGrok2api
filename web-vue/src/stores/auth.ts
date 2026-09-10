@@ -1,52 +1,71 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { authApi } from '@/api/auth'
+
+import {
+  authApi,
+  type AuthCapabilities,
+  type AuthCapability,
+  type AuthSubject,
+  type AuthView,
+} from '@/api/auth'
 import { getAuthToken } from '@/api/client'
-import type { AuthStatusResponse } from '@/types/api'
 
-type AuthRole = 'admin' | 'user' | ''
+const AUTH_CACHE_MS = 60000
 
-function normalizeRole(value: unknown): AuthRole {
-  const role = String(value || '').trim().toLowerCase()
-  return role === 'admin' || role === 'user' ? role : ''
+function emptyCapabilities(): AuthCapabilities {
+  return { admin_console: false, studio: false }
 }
 
 export const useAuthStore = defineStore('auth', () => {
   const isLoggedIn = ref(false)
   const isLoading = ref(false)
-  const role = ref<AuthRole>('')
-  const subjectId = ref('')
-  const name = ref('')
+  const subject = ref<AuthSubject | null>(null)
+  const capabilities = ref<AuthCapabilities>(emptyCapabilities())
+  const homeRoute = ref<AuthView['home_route']>('/login')
+  const version = ref('')
   const lastCheckedAt = ref(0)
-  const AUTH_CACHE_MS = 60000
   let checkPromise: Promise<boolean> | null = null
 
-  const isAdmin = computed(() => role.value === 'admin')
-  const isUser = computed(() => role.value === 'user')
+  const role = computed(() => subject.value?.role || '')
+  const subjectId = computed(() => subject.value?.id || '')
+  const name = computed(() => subject.value?.name || '')
+  const isAdmin = computed(() => capabilities.value.admin_console)
 
-  function applyStatus(status: AuthStatusResponse | undefined | null) {
-    isLoggedIn.value = Boolean(status?.authenticated)
-    role.value = isLoggedIn.value ? normalizeRole(status?.role) : ''
-    subjectId.value = isLoggedIn.value ? String(status?.subject_id || '') : ''
-    name.value = isLoggedIn.value ? String(status?.name || '') : ''
+  function hasCapability(capability: AuthCapability) {
+    return capabilities.value[capability] === true
+  }
+
+  function applyStatus(status: AuthView) {
+    if (!status.authenticated || !status.subject) {
+      clearIdentity()
+      version.value = status.version
+      return false
+    }
+    isLoggedIn.value = true
+    subject.value = status.subject
+    capabilities.value = {
+      admin_console: status.capabilities.admin_console === true,
+      studio: status.capabilities.studio === true,
+    }
+    homeRoute.value = status.home_route
+    version.value = status.version
+    return true
   }
 
   function clearIdentity() {
     isLoggedIn.value = false
-    role.value = ''
-    subjectId.value = ''
-    name.value = ''
+    subject.value = null
+    capabilities.value = emptyCapabilities()
+    homeRoute.value = '/login'
   }
 
-  // 登录
   async function login(password: string) {
     isLoading.value = true
     try {
-      await authApi.login({ password })
-      const status = await authApi.checkAuth()
-      applyStatus(status)
+      const status = await authApi.login({ password })
+      const authenticated = applyStatus(status)
       lastCheckedAt.value = Date.now()
-      return isLoggedIn.value
+      return authenticated
     } catch (error) {
       clearIdentity()
       throw error
@@ -55,7 +74,6 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  // 登出
   async function logout() {
     try {
       await authApi.logout()
@@ -65,7 +83,6 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  // 检查登录状态
   async function checkAuth() {
     if (!getAuthToken()) {
       clearIdentity()
@@ -83,12 +100,12 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       checkPromise = (async () => {
         const status = await authApi.checkAuth()
-        applyStatus(status)
+        const authenticated = applyStatus(status)
         lastCheckedAt.value = Date.now()
-        return isLoggedIn.value
+        return authenticated
       })()
       return await checkPromise
-    } catch (error) {
+    } catch {
       clearIdentity()
       lastCheckedAt.value = 0
       return false
@@ -100,11 +117,15 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     isLoggedIn,
     isLoading,
+    subject,
+    capabilities,
+    homeRoute,
+    version,
     role,
     subjectId,
     name,
     isAdmin,
-    isUser,
+    hasCapability,
     login,
     logout,
     checkAuth,

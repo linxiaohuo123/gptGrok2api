@@ -14,7 +14,7 @@ type StudioConversationLookupRef = {
 
 export type StudioConversationActionsRuntimeHooks = {
   cancelMessageEdit: (clearComposer?: boolean) => void
-  resetImageTasks: () => void
+  resetTasks: () => void
   scheduleScrollToBottom: () => void
 }
 
@@ -100,7 +100,7 @@ export function useStudioConversationActionsRuntime(input: StudioConversationAct
   function clearHistory() {
     input.hooks.cancelMessageEdit()
     input.conversations.value = []
-    input.hooks.resetImageTasks()
+    input.hooks.resetTasks()
     input.conversationNotices.value = {}
     input.activeConversationId.value = ''
     createConversation()
@@ -116,7 +116,7 @@ export function useStudioConversationActionsRuntime(input: StudioConversationAct
     conversation.title = '新对话'
     clearConversationNotice(conversation.id)
     touchConversation(conversation)
-    input.hooks.resetImageTasks()
+    input.hooks.resetTasks()
     input.hooks.scheduleScrollToBottom()
     return conversation
   }

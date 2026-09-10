@@ -1,12 +1,10 @@
 import { computed, ref, toRef } from 'vue'
-import { useRouter } from 'vue-router'
 import { accountsApi } from '@/api/accounts'
 import type {
   Account,
 } from '@/api/accounts'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { usePagedQuery } from '@/composables/usePageQuery'
-import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { errorMessage } from '@/lib/errorMessage'
 import { useAccountBulkActionsRuntime } from './accountBulkActionsRuntime'
@@ -18,15 +16,14 @@ import { useAccountImportRuntime } from './accountImportRuntime'
 import { useAccountPageLifecycleRuntime } from './accountPageLifecycleRuntime'
 import { useAccountProxyRuntime } from './accountProxyRuntime'
 import { useAccountSelectionRuntime } from './accountSelectionRuntime'
-import { checkoutFinalLinkUrl, statusCategory, type AccountStatusFilter } from './viewUtils'
+import { useAccountTestRuntime } from './accountTestRuntime'
+import type { AccountStatusFilter } from './viewUtils'
 
 type AccountsViewMode = 'list' | 'cards'
-type AccountListStatusFilter = AccountStatusFilter | 'valid_checkout'
 export type { AccountImportMode } from './accountImportRuntime'
 
 const ACCOUNT_PAGE_SIZE_OPTIONS = [20, 50, 100]
 const DEFAULT_PAGE_SIZE = 20
-const REFRESH_BATCH_SIZE = 20
 const ACCOUNT_LIST_REQUEST_KEY = 'accounts:list'
 const ACCOUNT_GROUPS_REQUEST_KEY = 'accounts:groups'
 const LIST_RELOAD_TIMER_KEY = 'accounts:list-reload'
@@ -38,7 +35,7 @@ function normalizeErrorMessage(error: unknown): string {
 export function useAccountsPage() {
   const loading = ref(false)
   const keyword = ref('')
-  const statusFilter = ref<AccountListStatusFilter>('all')
+  const statusFilter = ref<AccountStatusFilter>('all')
   const groupFilter = ref('all')
   const pageSize = ref(DEFAULT_PAGE_SIZE)
   const accounts = ref<Account[]>([])
@@ -46,9 +43,7 @@ export function useAccountsPage() {
   const viewMode = ref<AccountsViewMode>('list')
   const bulkProgress = useAccountBulkProgressRuntime()
   const toast = useToast()
-  const confirmDialog = useConfirmDialog()
   const pageRuntime = usePageRuntime('accounts')
-  const router = useRouter()
   const accountListQuery = usePagedQuery({
     runtime: pageRuntime,
     key: ACCOUNT_LIST_REQUEST_KEY,
@@ -72,36 +67,23 @@ export function useAccountsPage() {
     resolveTotal: (res) => res.total ?? res.accounts?.length ?? 0,
     apply: (res) => {
       accountAllTotal.value = Number(res.all_total ?? 0)
-      accounts.value = (res.accounts || []).map((item) => ({
-        ...item,
-        lanes: Array.isArray(item.lanes) ? item.lanes : [],
-        model_ids: {
-          fast: item.model_ids?.fast || '',
-          thinking: item.model_ids?.thinking || '',
-          pro: item.model_ids?.pro || '',
-        },
-      }))
+      accounts.value = res.accounts || []
       accountSelection.pruneToCurrentAccounts()
     },
     onError: (_message, error) => {
       setError('加载失败', error)
     },
   })
-  const filteredAccounts = computed(() => accounts.value)
+  const visibleAccounts = computed(() => accounts.value)
 
   const currentPage = accountListQuery.currentPage
   const accountListTotal = accountListQuery.total
-  const pageCount = accountListQuery.pageCount
-
-  const pagedAccounts = computed(() => accounts.value)
-
   const statusFilterOptions = [
     { label: '全部状态', value: 'all' },
     { label: '正常', value: 'normal' },
     { label: '限流', value: 'limited' },
     { label: '异常', value: 'abnormal' },
     { label: '禁用', value: 'disabled' },
-    { label: '有效支付链接', value: 'valid_checkout' },
   ] as const
 
   const groupFilterOptions = computed(() => [
@@ -113,31 +95,33 @@ export function useAccountsPage() {
     })),
   ])
 
-  const abnormalAccountIds = computed(() => (
-    accounts.value
-      .filter((item) => statusCategory(item) === 'abnormal')
-      .map((item) => item.id)
-  ))
-
-  const abnormalAccountCount = computed(() => abnormalAccountIds.value.length)
   const accountSelection = useAccountSelectionRuntime({
     accounts,
-    pagedAccounts,
+    pagedAccounts: visibleAccounts,
+    total: accountListTotal,
+    allTotal: accountAllTotal,
+    keyword,
+    status: statusFilter,
+    groupId: groupFilter,
   })
-  const selectedIds = accountSelection.selectedIds
   const selectedCount = accountSelection.selectedCount
+  const scopedSelectionActive = accountSelection.scopedSelectionActive
   const allVisibleSelected = accountSelection.allVisibleSelected
-  const batchBusy = bulkProgress.batchBusy
-  const batchActionLabel = bulkProgress.batchActionLabel
+  const someVisibleSelected = accountSelection.someVisibleSelected
+  const allMatchingSelected = accountSelection.allMatchingSelected
+  const selectionScope = accountSelection.selectionScope
+  const batchInteractionBusy = ref(false)
+  const batchBusy = computed(() => bulkProgress.batchBusy.value || batchInteractionBusy.value)
   const showRefreshProgress = bulkProgress.showRefreshProgress
   const refreshProgressTitle = bulkProgress.refreshProgressTitle
   const refreshProgress = bulkProgress.refreshProgress
+  const refreshProgressKind = bulkProgress.refreshProgressKind
   const refreshProgressPercent = bulkProgress.refreshProgressPercent
-  const refreshProgressMetricLabel = bulkProgress.refreshProgressMetricLabel
-  const refreshProgressMetricValue = bulkProgress.refreshProgressMetricValue
   const refreshProgressStatusText = bulkProgress.refreshProgressStatusText
   const canStopRefreshProgress = bulkProgress.canStopRefreshProgress
+  const canCloseRefreshProgress = bulkProgress.canCloseRefreshProgress
   const bulkStopRequested = bulkProgress.bulkStopRequested
+  const accountOperationEvents = bulkProgress.operationEvents
 
   function setError(prefix: string, error: unknown, notify = true) {
     const message = normalizeErrorMessage(error)
@@ -179,17 +163,19 @@ export function useAccountsPage() {
   const setAccountGroupCustomProxyInput = accountGroupsRuntime.setAccountGroupCustomProxyInput
 
   const accountCrud = useAccountCrudRuntime({
+    bulkProgress,
     loadData,
     loadAccountGroups,
     normalizeErrorMessage,
     setError,
+    isBatchBusy: () => batchBusy.value,
   })
   const saving = accountCrud.saving
   const showModal = accountCrud.showModal
   const editingId = accountCrud.editingId
-  const refreshingAccountId = accountCrud.refreshingAccountId
-  const resettingAccountId = accountCrud.resettingAccountId
-  const accountStatusOptions = accountCrud.accountStatusOptions
+  const syncingAccountIds = accountCrud.syncingAccountIds
+  const refreshingAccessTokenAccountIds = accountCrud.refreshingAccessTokenAccountIds
+  const accountOperationBusy = accountCrud.accountOperationBusy
   const form = accountCrud.form
 
   const accountProxyRuntime = useAccountProxyRuntime({
@@ -208,13 +194,16 @@ export function useAccountsPage() {
   const selectProxyGroup = accountProxyRuntime.selectProxyGroup
   const setCustomProxyInput = accountProxyRuntime.setCustomProxyInput
   const testAccountProxy = accountProxyRuntime.testAccountProxy
-  accountCrud.setProxyControlsSync(accountProxyRuntime.syncProxyControlsFromValue)
+  accountCrud.setProxyControlsSync(accountProxyRuntime.syncProxyControlsFromProjection)
 
   const accountExport = useAccountExportRuntime({
     accounts,
-    selectedIds,
+    selectedCount,
+    selectionScope,
+    scopedSelectionActive,
     accountAllTotal,
     accountListTotal,
+    reconcileSelection: () => reconcileScopedSelection(true),
     setError,
   })
   const exportBusy = accountExport.exportBusy
@@ -225,11 +214,13 @@ export function useAccountsPage() {
     normalizeErrorMessage,
     setError,
     loadData,
+    loadGroups: loadAccountGroups,
   })
   const importBusy = accountImport.importBusy
   const showImportModal = accountImport.showImportModal
   const importMode = accountImport.importMode
   const importModeOptions = accountImport.importModeOptions
+  const importTargetGroupValue = accountImport.importTargetGroupValue
   const oauthEmailHint = accountImport.oauthEmailHint
   const oauthCallbackText = accountImport.oauthCallbackText
   const oauthSessionId = accountImport.oauthSessionId
@@ -241,128 +232,81 @@ export function useAccountsPage() {
   const accountBulkActions = useAccountBulkActionsRuntime({
     bulkProgress,
     accountSelection,
-    accounts,
     accountGroups,
     proxyGroups,
     selectedBindGroupId,
-    accountAllTotal,
-    accountListTotal,
-    refreshBatchSize: REFRESH_BATCH_SIZE,
     normalizeErrorMessage,
     setError,
     loadData,
+    reconcileSelection: () => reconcileScopedSelection(true),
     applyAccountGroupsPayload,
   })
-  const refreshAllAccounts = accountBulkActions.refreshAllAccounts
-  const refreshSelectedAccounts = accountBulkActions.refreshSelectedAccounts
-  const requestStopRefreshProgress = accountBulkActions.requestStopRefreshProgress
-  const runBulkAction = accountBulkActions.runBulkAction
-  const bindSelectedAccountsToGroup = accountBulkActions.bindSelectedAccountsToGroup
-
-  async function copyAccountToken(item: Account) {
+  async function runBatchInteraction<T>(operation: () => Promise<T>) {
+    if (batchBusy.value || accountOperationBusy.value) return undefined
+    batchInteractionBusy.value = true
     try {
-      let token = String(item.access_token || '').trim()
-      if (!token && item.has_access_token !== false) {
-        token = await accountsApi.getAccountToken(item.id)
-      }
+      return await operation()
+    } finally {
+      batchInteractionBusy.value = false
+    }
+  }
+
+  const requestStopRefreshProgress = accountBulkActions.requestStopRefreshProgress
+  const runBulkAction = (...args: Parameters<typeof accountBulkActions.runBulkAction>) => (
+    runBatchInteraction(() => accountBulkActions.runBulkAction(...args))
+  )
+  const bindSelectedAccountsToGroup = () => runBatchInteraction(accountBulkActions.bindSelectedAccountsToGroup)
+
+  async function copyAccountCredential(item: Account, kind: 'access' | 'refresh') {
+    const label = kind === 'access' ? 'AT' : 'RT'
+    try {
+      const token = kind === 'access'
+        ? await accountsApi.getAccessToken(item.id)
+        : await accountsApi.getRefreshToken(item.id)
       if (!token) {
-        toast.warning('当前账号没有可复制的 Token')
+        toast.warning(`当前账号没有可复制的 ${label}`)
         return
       }
       await navigator.clipboard.writeText(token)
-      toast.success('Token 已复制')
+      toast.success(`${label} 已复制`)
     } catch (error) {
-      setError('复制 Token 失败', error)
+      setError(`复制 ${label} 失败`, error)
     }
-  }
-
-  async function extractSelectedCheckout() {
-    if (batchBusy.value) {
-      toast.info('已有批量操作正在执行')
-      return
-    }
-
-    const selected = new Set(selectedIds.value)
-    const targetAccounts = accounts.value.filter((item) => selected.has(item.id) && !item.is_demo)
-    if (!targetAccounts.length) {
-      toast.warning('请先选择 OpenAI 账号')
-      return
-    }
-
-    const title = '批量持续提链'
-    const confirmed = await confirmDialog.ask({
-      title,
-      message: `将把 ${targetAccounts.length} 个选中账号按当前渠道配置追加到持续提链队列，直到成功或你停止任务。是否继续？`,
-      confirmText: '加入队列',
-      cancelText: '取消',
-    })
-    if (!confirmed || batchBusy.value) return
-
-    bulkProgress.start(title, targetAccounts.length, 'checkout')
-    try {
-      const result = await accountsApi.enqueueCheckoutRetries(targetAccounts.map((item) => item.id))
-      const queued = Math.max(0, Number(result.queued || 0))
-      const skipped = Math.max(0, Number(result.skipped || 0))
-      bulkProgress.finish({
-        total: targetAccounts.length,
-        processed: targetAccounts.length,
-        total_quota: 0,
-      })
-      if (queued > 0) {
-        toast.success(`已加入 ${queued} 个持续提链任务${skipped ? `，跳过 ${skipped} 个` : ''}，正在打开提链进度`)
-        try {
-          await router.push({ name: 'register', query: { focus: 'checkout' } })
-        } catch {
-          toast.warning('任务已加入队列，请前往“账号注册”查看提链进度')
-        }
-      } else {
-        toast.warning(skipped ? `没有新增提链任务，跳过 ${skipped} 个` : '未加入新的提链任务')
-      }
-    } catch (error) {
-      bulkProgress.fail(targetAccounts.length, 0, normalizeErrorMessage(error))
-      setError('加入持续提链队列失败', error)
-    } finally {
-      try {
-        await loadData({ silentErrorToast: true })
-      } catch {
-        toast.warning('任务已加入队列，但账号列表刷新失败')
-      }
-      bulkProgress.end()
-    }
-  }
-
-  async function copyFinalCheckoutLink(item: Account) {
-    const url = checkoutFinalLinkUrl(item)
-    if (!url) {
-      toast.warning('当前账号没有可复制的最终支付链接')
-      return
-    }
-    try {
-      await navigator.clipboard.writeText(url)
-      toast.success('最终支付链接已复制')
-    } catch (error) {
-      setError('复制最终支付链接失败', error)
-    }
-  }
-
-  function openFinalCheckoutLink(item: Account) {
-    const url = checkoutFinalLinkUrl(item)
-    if (!url) {
-      toast.warning('当前账号没有可打开的最终支付链接')
-      return
-    }
-    const opened = window.open(url, '_blank', 'noopener,noreferrer')
-    if (!opened) toast.warning('浏览器阻止了新窗口，请允许弹窗后重试')
   }
 
   async function loadData(options?: { silentErrorToast?: boolean }) {
     await accountListQuery.load({ silentError: options?.silentErrorToast })
+    await reconcileScopedSelection(false)
+  }
+
+  const accountTest = useAccountTestRuntime({
+    loadData,
+    setError,
+  })
+
+  async function reconcileScopedSelection(notify: boolean) {
+    if (!accountSelection.scopedSelectionActive.value) return true
+    const expectedRevision = accountSelection.selectionRevision.value
+    const currentScope = accountSelection.selectionScope.value
+    const selection = {
+      ...currentScope,
+      account_ids: [...(currentScope.account_ids || [])],
+      excluded_account_ids: [...(currentScope.excluded_account_ids || [])],
+    }
+    try {
+      const preview = await accountsApi.previewSelection(selection)
+      return accountSelection.reconcileScopedSelection(preview, expectedRevision)
+    } catch (error) {
+      if (notify) setError('核对已选账号数量失败', error)
+      return false
+    }
   }
 
   const isSelected = accountSelection.isSelected
   const toggleSelect = accountSelection.toggleSelect
   const clearSelection = accountSelection.clearSelection
   const toggleSelectAllVisible = accountSelection.toggleSelectAllVisible
+  const selectAllMatching = accountSelection.selectAllMatching
 
   const setImportMode = accountImport.setImportMode
   const openImportModal = accountImport.openImportModal
@@ -374,7 +318,11 @@ export function useAccountsPage() {
   const openOAuthAuthorizeUrl = accountImport.openOAuthAuthorizeUrl
   const copyOAuthAuthorizeUrl = accountImport.copyOAuthAuthorizeUrl
   const finishOAuthLogin = accountImport.finishOAuthLogin
-  const importLocalCPAFiles = accountImport.importLocalCPAFiles
+  const importLocalAccountFiles = accountImport.importLocalAccountFiles
+  const updateRemoteImportProgress = accountImport.updateRemoteImportProgress
+  const startRemoteImportTracking = accountImport.startRemoteImportTracking
+  const stopRemoteImportTracking = accountImport.stopRemoteImportTracking
+  const resumeRemoteImportTracking = accountImport.resumeRemoteImportTracking
 
   function closeRefreshProgress() {
     bulkProgress.close()
@@ -385,9 +333,13 @@ export function useAccountsPage() {
   const closeModal = accountCrud.closeModal
   const saveAccount = accountCrud.saveAccount
   const toggleEnabled = accountCrud.toggleEnabled
-  const refreshToken = accountCrud.refreshToken
-  const resetAccountState = accountCrud.resetAccountState
-  const removeAccount = accountCrud.removeAccount
+  const syncAccount = accountCrud.syncAccount
+  const refreshAccessToken = accountCrud.refreshAccessToken
+  const removeAccount = (item: Account) => runBulkAction(
+    'delete',
+    [item.id],
+    { [item.id]: item.email || item.display_name || item.id },
+  )
 
   const pageLifecycle = useAccountPageLifecycleRuntime({
     runtime: pageRuntime,
@@ -405,23 +357,43 @@ export function useAccountsPage() {
     invalidateData: accountListQuery.invalidate,
     invalidateGroups: accountGroupsRuntime.invalidate,
     clearSelection,
+    clearPageSelection: accountSelection.clearExplicitSelection,
     shouldSkipRefresh: () => Boolean(
       showModal.value ||
       showImportModal.value ||
       showAccountGroupsModal.value ||
+      accountTest.opened.value ||
       saving.value ||
       batchBusy.value ||
+      accountOperationBusy.value ||
       importBusy.value ||
       accountGroupsLoading.value ||
       accountGroupSaving.value,
     ),
   })
+  pageRuntime.onActivate(() => {
+    void resumeRemoteImportTracking()
+  })
+  pageRuntime.onShow(() => {
+    void resumeRemoteImportTracking()
+  })
+  pageRuntime.onDeactivate(stopRemoteImportTracking)
+  pageRuntime.onHide(stopRemoteImportTracking)
   const setViewMode = pageLifecycle.setViewMode
 
   return {
     loading,
     saving,
     showModal,
+    showAccountTestModal: accountTest.opened,
+    accountTestAccount: accountTest.account,
+    accountTestMode: accountTest.mode,
+    accountTestModel: accountTest.model,
+    accountTestPrompt: accountTest.prompt,
+    accountTestRunning: accountTest.running,
+    accountTestResult: accountTest.result,
+    accountTestModelOptions: accountTest.modelOptions,
+    accountTestModelCatalogLoading: accountTest.modelCatalogLoading,
     keyword,
     statusFilter,
     groupFilter,
@@ -431,24 +403,24 @@ export function useAccountsPage() {
     accounts,
     accountListTotal,
     accountAllTotal,
-    selectedIds,
     selectedCount,
-    abnormalAccountCount,
     allVisibleSelected,
+    someVisibleSelected,
+    allMatchingSelected,
     currentPage,
     pageSize,
     pageSizeOptions: ACCOUNT_PAGE_SIZE_OPTIONS,
-    pageCount,
     batchBusy,
-    batchActionLabel,
     viewMode,
-    refreshingAccountId,
-    resettingAccountId,
+    syncingAccountIds,
+    refreshingAccessTokenAccountIds,
+    accountOperationBusy,
     importBusy,
     exportBusy,
     showImportModal,
     importMode,
     importModeOptions,
+    importTargetGroupValue,
     oauthEmailHint,
     oauthCallbackText,
     oauthSessionId,
@@ -481,21 +453,22 @@ export function useAccountsPage() {
     showRefreshProgress,
     refreshProgressTitle,
     refreshProgress,
+    refreshProgressKind,
     refreshProgressPercent,
-    refreshProgressMetricLabel,
-    refreshProgressMetricValue,
     refreshProgressStatusText,
     canStopRefreshProgress,
+    canCloseRefreshProgress,
     bulkStopRequested,
-    accountStatusOptions,
+    accountOperationEvents,
     form,
-    filteredAccounts,
-    pagedAccounts,
+    visibleAccounts,
     setViewMode,
     isSelected,
     toggleSelect,
     clearSelection,
     toggleSelectAllVisible,
+    selectAllMatching,
+    selectAllAccounts: accountSelection.selectAllAccounts,
     setImportMode,
     openImportModal,
     closeImportModal,
@@ -520,23 +493,24 @@ export function useAccountsPage() {
     openOAuthAuthorizeUrl,
     copyOAuthAuthorizeUrl,
     finishOAuthLogin,
-    importLocalCPAFiles,
-    refreshAllAccounts,
-    refreshSelectedAccounts,
+    importLocalAccountFiles,
+    updateRemoteImportProgress,
+    startRemoteImportTracking,
     requestStopRefreshProgress,
     closeRefreshProgress,
     loadData,
-    copyAccountToken,
-    extractSelectedCheckout,
-    copyFinalCheckoutLink,
-    openFinalCheckoutLink,
+    copyAccountCredential,
     openCreateModal,
     openEditModal,
+    openAccountTest: accountTest.open,
+    closeAccountTest: accountTest.close,
+    setAccountTestMode: accountTest.setMode,
+    runAccountTest: accountTest.run,
     closeModal,
     saveAccount,
     toggleEnabled,
-    refreshToken,
-    resetAccountState,
+    syncAccount,
+    refreshAccessToken,
     removeAccount,
     runBulkAction,
     bindSelectedAccountsToGroup,

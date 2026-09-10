@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（net/http、crypto）
+// [OUTPUT]: OAuth 登录：NewOpenAILogin、Start、Finish
+// [POS]: 授权链接构造与 code 换 token，state 校验防 CSRF。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package oauth
 
 import (

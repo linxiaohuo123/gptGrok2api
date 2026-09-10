@@ -232,3 +232,36 @@ func formString(r *http.Request) string {
 	values, _ := url.ParseQuery(strings.TrimSpace(r.Form.Encode()))
 	return values.Encode()
 }
+
+func TestOpenAIFingerprintIsolationAndStability(t *testing.T) {
+	acc1 := map[string]any{"token": "token-1", "email": "a1@test.local"}
+	acc2 := map[string]any{"token": "token-2", "email": "a2@test.local"}
+
+	fp1a := buildOpenAIFingerprint(acc1)
+	fp1b := buildOpenAIFingerprint(acc1)
+	fp2 := buildOpenAIFingerprint(acc2)
+
+	if fp1a.DeviceID != fp1b.DeviceID {
+		t.Fatalf("expected stable device ID for same account, got %q vs %q", fp1a.DeviceID, fp1b.DeviceID)
+	}
+	if fp1a.SessionID != fp1b.SessionID {
+		t.Fatalf("expected stable session ID for same account, got %q vs %q", fp1a.SessionID, fp1b.SessionID)
+	}
+	if fp1a.DeviceID == fp2.DeviceID {
+		t.Fatalf("expected isolated device IDs for different accounts, got identical %q", fp1a.DeviceID)
+	}
+	if fp1a.SessionID == fp2.SessionID {
+		t.Fatalf("expected isolated session IDs for different accounts, got identical %q", fp1a.SessionID)
+	}
+	if !strings.Contains(fp1a.UserAgent, "133") {
+		t.Fatalf("expected Chrome 133 User-Agent, got %q", fp1a.UserAgent)
+	}
+
+	custom := buildOpenAIFingerprint(map[string]any{
+		"token":         "token-custom",
+		"oai_device_id": "custom-dev-id",
+	})
+	if custom.DeviceID != "custom-dev-id" {
+		t.Fatalf("expected custom device ID override, got %q", custom.DeviceID)
+	}
+}

@@ -30,7 +30,7 @@ ENV GO_LISTEN_ADDR=:80 \
     GO_STATIC_DIR=/app/web_dist \
     GO_CONFIG_PATH=/app/data/config.json \
     GO_AUTH_KEYS_PATH=/app/data/auth_keys.json \
-    GROK_DATA_DIR=/app/data \
+    GO_DATA_DIR=/app/data \
     GO_QUEUE_BACKEND=json
 EXPOSE 80
 ENTRYPOINT ["/app/gptgrok2api"]

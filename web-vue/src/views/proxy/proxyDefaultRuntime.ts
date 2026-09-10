@@ -1,29 +1,26 @@
 import { computed, ref, type Ref } from 'vue'
 
-import { prepareSettingsForEdit, settingsApi } from '@/api/settings'
 import {
-  parseProxyReference,
   proxyApi,
-  serializeProxyReference,
+  type ProxyEffectiveReference,
   type ProxyGroup,
+  type ProxyReference,
   type ProxyTestResult,
+  type ProxyView,
 } from '@/api/proxy'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { usePageQuery } from '@/composables/usePageQuery'
 import type { usePageRuntime } from '@/composables/usePageRuntime'
-import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
-import { errorMessage } from '@/lib/errorMessage'
-import type { Settings } from '@/types/api'
+import { errorMessage, prefixedErrorMessage } from '@/lib/errorMessage'
 import {
-  normalizeDefaultProxyForCompare,
   proxyGroupOptions as buildProxyGroupOptions,
+  proxyTestToastType,
   toDefaultProxyMode,
   toFallbackProxyMode,
   type DefaultProxyMode,
   type FallbackProxyMode,
 } from '@/views/proxy/proxyView'
-import { proxyActionError } from '@/views/proxy/proxyGroupRuntime'
 
 type ProxyDefaultRuntimeOptions = {
   runtime: ReturnType<typeof usePageRuntime>
@@ -35,20 +32,25 @@ type ProxyDefaultRuntimeOptions = {
 
 export const DEFAULT_TEST_KEY = '__default__'
 
+const EMPTY_EFFECTIVE_DEFAULT: ProxyEffectiveReference = {
+  source: 'direct',
+  label: '直连',
+  configured: false,
+  available: true,
+  has_proxy: false,
+  group_id: '',
+}
+
 function firstSelectValue(value: string | string[]) {
   return Array.isArray(value) ? value[0] : value
 }
 
-function defaultProxyFromSettings(settings: Settings) {
-  return String(settings.basic?.proxy || settings.proxy || '').trim()
-}
-
-function fallbackProxyFromSettings(settings: Settings) {
-  return String(settings.fallback_proxy || '').trim()
+function referenceKey(reference: ProxyReference | null) {
+  if (!reference) return 'off'
+  return `${reference.mode}|${reference.group_id}|${reference.url}`
 }
 
 export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
-  const settingsStore = useSettingsStore()
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
   const loading = ref(false)
@@ -59,7 +61,7 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
   const fallbackProxyMode = ref<FallbackProxyMode>('off')
   const selectedFallbackProxyGroupId = ref('')
   const fallbackCustomProxyInput = ref('')
-  const currentSettings = ref<Settings | null>(null)
+  const currentView = ref<ProxyView | null>(null)
   const defaultTestResult = ref<ProxyTestResult | null>(null)
 
   const proxyDataQuery = usePageQuery({
@@ -73,6 +75,14 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
     buildProxyGroupOptions(options.groups.value, selectedDefaultProxyGroupId.value)
   ))
 
+  const fallbackProxyGroupOptions = computed(() => (
+    buildProxyGroupOptions(options.groups.value, selectedFallbackProxyGroupId.value)
+  ))
+
+  const effectiveDefault = computed(() => (
+    currentView.value?.effective_default || EMPTY_EFFECTIVE_DEFAULT
+  ))
+
   const canTestDefaultProxy = computed(() => {
     if (defaultProxyMode.value === 'group') return Boolean(selectedDefaultProxyGroupId.value)
     if (defaultProxyMode.value === 'custom') return Boolean(defaultCustomProxyInput.value.trim())
@@ -80,64 +90,46 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
   })
 
   const isDefaultProxyDirty = computed(() => {
-    const settings = currentSettings.value
-    if (!settings) return false
+    const view = currentView.value
+    if (!view) return false
     return (
-      normalizeDefaultProxyForCompare(defaultProxyValue()) !== normalizeDefaultProxyForCompare(defaultProxyFromSettings(settings))
-      || normalizeDefaultProxyForCompare(fallbackProxyValue()) !== normalizeDefaultProxyForCompare(fallbackProxyFromSettings(settings))
+      referenceKey(defaultProxyReference()) !== referenceKey(view.default_reference)
+      || referenceKey(fallbackProxyReference()) !== referenceKey(view.fallback_reference)
     )
   })
 
-  function defaultProxyValue() {
-    if (defaultProxyMode.value === 'direct') return serializeProxyReference('direct')
-    if (defaultProxyMode.value === 'group') return serializeProxyReference('group', selectedDefaultProxyGroupId.value)
-    return serializeProxyReference('custom', defaultCustomProxyInput.value)
+  function defaultProxyReference(): ProxyReference {
+    if (defaultProxyMode.value === 'direct') {
+      return { mode: 'direct', group_id: '', url: '' }
+    }
+    if (defaultProxyMode.value === 'group') {
+      return { mode: 'group', group_id: selectedDefaultProxyGroupId.value, url: '' }
+    }
+    return { mode: 'custom', group_id: '', url: defaultCustomProxyInput.value.trim() }
   }
 
-  function fallbackProxyValue() {
-    if (fallbackProxyMode.value === 'off') return ''
-    if (fallbackProxyMode.value === 'direct') return serializeProxyReference('direct')
-    if (fallbackProxyMode.value === 'group') return serializeProxyReference('group', selectedFallbackProxyGroupId.value)
-    return serializeProxyReference('custom', fallbackCustomProxyInput.value)
+  function fallbackProxyReference(): ProxyReference | null {
+    if (fallbackProxyMode.value === 'off') return null
+    if (fallbackProxyMode.value === 'direct') {
+      return { mode: 'direct', group_id: '', url: '' }
+    }
+    if (fallbackProxyMode.value === 'group') {
+      return { mode: 'group', group_id: selectedFallbackProxyGroupId.value, url: '' }
+    }
+    return { mode: 'custom', group_id: '', url: fallbackCustomProxyInput.value.trim() }
   }
 
-  function syncDefaultProxyControlsFromValue(value: unknown) {
-    const reference = parseProxyReference(value)
-    selectedDefaultProxyGroupId.value = ''
-    defaultCustomProxyInput.value = ''
+  function syncDefaultProxyControls(reference: ProxyReference) {
+    defaultProxyMode.value = reference.mode
+    selectedDefaultProxyGroupId.value = reference.mode === 'group' ? reference.group_id : ''
+    defaultCustomProxyInput.value = reference.mode === 'custom' ? reference.url : ''
     defaultTestResult.value = null
-    if (reference.mode === 'group') {
-      defaultProxyMode.value = 'group'
-      selectedDefaultProxyGroupId.value = reference.value
-      return
-    }
-    if (reference.mode === 'custom' || reference.mode === 'profile') {
-      defaultProxyMode.value = 'custom'
-      defaultCustomProxyInput.value = reference.mode === 'profile' ? String(value || '').trim() : reference.value
-      return
-    }
-    defaultProxyMode.value = 'direct'
   }
 
-  function syncFallbackProxyControlsFromValue(value: unknown) {
-    const reference = parseProxyReference(value)
-    selectedFallbackProxyGroupId.value = ''
-    fallbackCustomProxyInput.value = ''
-    if (reference.mode === 'group') {
-      fallbackProxyMode.value = 'group'
-      selectedFallbackProxyGroupId.value = reference.value
-      return
-    }
-    if (reference.mode === 'direct') {
-      fallbackProxyMode.value = 'direct'
-      return
-    }
-    if (reference.mode === 'custom' || reference.mode === 'profile') {
-      fallbackProxyMode.value = 'custom'
-      fallbackCustomProxyInput.value = reference.mode === 'profile' ? String(value || '').trim() : reference.value
-      return
-    }
-    fallbackProxyMode.value = 'off'
+  function syncFallbackProxyControls(reference: ProxyReference | null) {
+    fallbackProxyMode.value = reference?.mode || 'off'
+    selectedFallbackProxyGroupId.value = reference?.mode === 'group' ? reference.group_id : ''
+    fallbackCustomProxyInput.value = reference?.mode === 'custom' ? reference.url : ''
   }
 
   function setDefaultProxyMode(mode: string | string[]) {
@@ -171,19 +163,38 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
     fallbackProxyMode.value = 'custom'
   }
 
+  function validateProxySelection(
+    mode: DefaultProxyMode | FallbackProxyMode,
+    groupId: string,
+    customInput: Ref<string>,
+    messages: {
+      missingGroup: string
+      missingCustom: string
+    },
+  ) {
+    if (mode === 'group' && !groupId) {
+      toast.warning(messages.missingGroup)
+      return false
+    }
+    if (mode !== 'custom') return true
+
+    const value = customInput.value.trim()
+    if (!value) {
+      toast.warning(messages.missingCustom)
+      return false
+    }
+    return true
+  }
+
   async function loadData() {
     await proxyDataQuery.run(
-      () => Promise.all([
-        settingsApi.get(),
-        proxyApi.listGroups(),
-      ]),
+      () => proxyApi.getView(),
       {
-        apply: ([settings, groupResponse]) => {
-          currentSettings.value = prepareSettingsForEdit(settings)
-          settingsStore.$patch({ settings })
-          options.updateGroups(groupResponse.groups || [])
-          syncDefaultProxyControlsFromValue(defaultProxyFromSettings(settings))
-          syncFallbackProxyControlsFromValue(fallbackProxyFromSettings(settings))
+        apply: (view) => {
+          currentView.value = view
+          options.updateGroups(view.groups)
+          syncDefaultProxyControls(view.default_reference)
+          syncFallbackProxyControls(view.fallback_reference)
         },
         onError: (message) => {
           toast.error(message)
@@ -193,26 +204,28 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
   }
 
   async function saveDefaultProxy() {
-    if (!currentSettings.value) {
+    if (!currentView.value) {
       toast.warning('配置尚未加载完成')
       return
     }
-    if (defaultProxyMode.value === 'group' && !selectedDefaultProxyGroupId.value) {
-      toast.warning('请选择默认出口代理组')
-      return
-    }
-    if (defaultProxyMode.value === 'custom' && !defaultCustomProxyInput.value.trim()) {
-      toast.warning('请填写自定义代理 URL')
-      return
-    }
-    if (fallbackProxyMode.value === 'group' && !selectedFallbackProxyGroupId.value) {
-      toast.warning('请选择备用出口代理组')
-      return
-    }
-    if (fallbackProxyMode.value === 'custom' && !fallbackCustomProxyInput.value.trim()) {
-      toast.warning('请填写备用代理 URL')
-      return
-    }
+    if (!validateProxySelection(
+      defaultProxyMode.value,
+      selectedDefaultProxyGroupId.value,
+      defaultCustomProxyInput,
+      {
+        missingGroup: '请选择默认出口代理组',
+        missingCustom: '请填写自定义代理 URL',
+      },
+    )) return
+    if (!validateProxySelection(
+      fallbackProxyMode.value,
+      selectedFallbackProxyGroupId.value,
+      fallbackCustomProxyInput,
+      {
+        missingGroup: '请选择备用出口代理组',
+        missingCustom: '请填写备用代理 URL',
+      },
+    )) return
     const confirmed = await confirmDialog.ask({
       title: '确认保存出口配置',
       message: '即将保存默认出口和备用出口配置。备用出口只在图片请求早期连接失败时重试一次，是否继续？',
@@ -223,19 +236,19 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
 
     savingDefaultProxy.value = true
     try {
-      const next = prepareSettingsForEdit(currentSettings.value)
-      next.proxy = defaultProxyValue()
-      next.fallback_proxy = fallbackProxyValue()
-      const response = await settingsStore.updateSettingsPatch({
-        proxy: next.proxy,
-        fallback_proxy: next.fallback_proxy,
+      const response = await proxyApi.saveDefaults({
+        default_reference: defaultProxyReference(),
+        fallback_reference: fallbackProxyReference(),
       })
-      currentSettings.value = prepareSettingsForEdit(response.config || next)
-      syncDefaultProxyControlsFromValue(defaultProxyFromSettings(currentSettings.value))
-      syncFallbackProxyControlsFromValue(fallbackProxyFromSettings(currentSettings.value))
+      currentView.value = {
+        ...currentView.value,
+        ...response,
+      }
+      syncDefaultProxyControls(response.default_reference)
+      syncFallbackProxyControls(response.fallback_reference)
       toast.success('出口配置已保存')
     } catch (error) {
-      toast.error(proxyActionError('保存出口配置失败', error))
+      toast.error(prefixedErrorMessage('保存出口配置失败', error))
     } finally {
       savingDefaultProxy.value = false
     }
@@ -253,14 +266,15 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
       toast.info('直连模式无需测试出口')
       return
     }
-    if (defaultProxyMode.value === 'group' && !selectedDefaultProxyGroupId.value) {
-      toast.warning('请选择默认出口代理组')
-      return
-    }
-    if (defaultProxyMode.value === 'custom' && !defaultCustomProxyInput.value.trim()) {
-      toast.warning('请先填写自定义代理 URL')
-      return
-    }
+    if (!validateProxySelection(
+      defaultProxyMode.value,
+      selectedDefaultProxyGroupId.value,
+      defaultCustomProxyInput,
+      {
+        missingGroup: '请选择默认出口代理组',
+        missingCustom: '请填写自定义代理 URL',
+      },
+    )) return
     const confirmed = await confirmDialog.ask({
       title: '确认测试默认出口',
       message: '即将使用当前默认出口发起外部网络测试请求。请确认当前允许测试该出口连接。',
@@ -273,19 +287,14 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
     try {
       if (defaultProxyMode.value === 'group') {
         const response = await proxyApi.testGroup({ id: selectedDefaultProxyGroupId.value })
-        if (response.groups) options.updateGroups(response.groups)
-        const results = response.results || []
-        const failed = results.filter((item) => !item.result.ok)
-        const firstResult = results[0]?.result
-        const maxLatency = results.reduce((max, item) => Math.max(max, Number(item.result.latency_ms || 0)), 0)
+        const firstResult = response.result || response.results[0]?.result
         defaultTestResult.value = {
-          ok: results.length > 0 && failed.length === 0,
+          ok: response.summary.status === 'success',
           status: firstResult?.status || 0,
-          latency_ms: maxLatency,
-          error: failed.length ? `代理组检测完成，失败 ${failed.length} 个节点` : null,
+          latency_ms: response.summary.max_latency_ms,
+          error: response.summary.status === 'success' ? null : response.summary.message,
         }
-        if (defaultTestResult.value.ok) toast.success(`默认出口代理组可用，共 ${results.length} 个节点`)
-        else toast.warning(defaultTestResult.value.error || '默认出口代理组测试失败')
+        toast[proxyTestToastType(response.summary.tone)](response.summary.message)
         return
       }
       const response = await proxyApi.test(defaultCustomProxyInput.value.trim())
@@ -321,6 +330,8 @@ export function useProxyDefaultRuntime(options: ProxyDefaultRuntimeOptions) {
     fallbackCustomProxyInput,
     defaultTestResult,
     defaultProxyGroupOptions,
+    fallbackProxyGroupOptions,
+    effectiveDefault,
     canTestDefaultProxy,
     isDefaultProxyDirty,
     setDefaultProxyMode,

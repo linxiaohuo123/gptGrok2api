@@ -1,34 +1,43 @@
 import { computed, reactive, ref } from 'vue'
 
-import { proxyApi, type ProxyGroup, type ProxyNode, type ProxyTestResult } from '@/api/proxy'
-import { useConfirmDialog } from '@/composables/useConfirmDialog'
-import { useToast } from '@/composables/useToast'
-import { errorMessage } from '@/lib/errorMessage'
 import {
-  proxyGroupActionItems as buildProxyGroupActionItems,
+  proxyApi,
+  type ProxyGroup,
+  type ProxyNode,
+  type ProxyNodeImportNode,
+  type ProxyNodeImportResult,
+  type ProxyTestResult,
+} from '@/api/proxy'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import { useOperationProgressRuntime } from '@/composables/useOperationProgressRuntime'
+import { useToast } from '@/composables/useToast'
+import { errorMessage, prefixedErrorMessage } from '@/lib/errorMessage'
+import {
   proxyGroupReference,
   proxyNodeTestClass,
   proxyNodeTestSummary,
 } from '@/views/proxy/proxyView'
+
+export type ProxyGroupNodeForm = {
+  id: string
+  name: string
+  url: string
+  enabled: boolean
+  image_concurrency_limit: number
+  notes: string
+}
 
 export type ProxyGroupForm = {
   id: string
   name: string
   enabled: boolean
   notes: string
-  nodes: ProxyNode[]
-  subscription_url: string
-  subscription_enabled: boolean
-  subscription_interval_minutes: number
-  subscription_node_image_concurrency_limit: number
-  subscription_last_updated_at: string
-  subscription_last_error: string
-  subscription_node_count: number
+  nodes: ProxyGroupNodeForm[]
 }
 
 export const FORM_TEST_KEY = '__form__'
 
-const DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY = 3
+const DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY = 30
 
 function createGeneratedId(prefix: string) {
   let suffix = ''
@@ -43,16 +52,8 @@ function createGeneratedId(prefix: string) {
   return `${prefix}-${suffix}`
 }
 
-function normalizeReferenceId(value: string) {
-  return value
-    .trim()
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^[-._]+|[-._]+$/g, '')
-    .slice(0, 64)
-}
-
-export function normalizeGroupId(value: string) {
-  return normalizeReferenceId(value)
+export function cleanProxyGroupDraftId(value: string) {
+  return String(value || '').trim()
 }
 
 export function normalizeImageConcurrencyLimit(value: unknown) {
@@ -61,7 +62,7 @@ export function normalizeImageConcurrencyLimit(value: unknown) {
   return Math.max(0, Math.min(10000, Math.floor(parsed)))
 }
 
-function createDefaultNode(index = 0): ProxyNode {
+function createDefaultNode(index = 0): ProxyGroupNodeForm {
   return {
     id: createGeneratedId('node'),
     name: `出口 ${index + 1}`,
@@ -79,80 +80,76 @@ function createDefaultGroupForm(): ProxyGroupForm {
     enabled: true,
     notes: '',
     nodes: [createDefaultNode(0)],
-    subscription_url: '',
-    subscription_enabled: true,
-    subscription_interval_minutes: 30,
-    subscription_node_image_concurrency_limit: DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY,
-    subscription_last_updated_at: '',
-    subscription_last_error: '',
-    subscription_node_count: 0,
   }
 }
 
-function normalizeGroupNode(item: ProxyNode, index: number): ProxyNode {
-  const id = normalizeGroupId(item.id || '') || createGeneratedId('node')
+function normalizeGroupNode(item: ProxyGroupNodeForm | ProxyNode, index: number): ProxyGroupNodeForm {
+  const id = cleanProxyGroupDraftId(item.id || '') || createGeneratedId('node')
   return {
     id,
     name: String(item.name || `出口 ${index + 1}`).trim(),
     url: String(item.url || '').trim(),
     enabled: item.enabled !== false,
     image_concurrency_limit: normalizeImageConcurrencyLimit(item.image_concurrency_limit ?? DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY),
-    last_status: Number(item.last_status || 0),
-    last_latency_ms: Number(item.last_latency_ms || 0),
-    fail_count: Number(item.fail_count || 0),
-    last_error: String(item.last_error || '').trim(),
-    last_checked_at: String(item.last_checked_at || '').trim(),
-    last_error_at: String(item.last_error_at || '').trim(),
-    cooldown_until: String(item.cooldown_until || '').trim(),
     notes: String(item.notes || '').trim(),
-    source: String(item.source || '').trim(),
-    subscription_managed: item.subscription_managed === true,
   }
 }
 
-function normalizeGroup(item: ProxyGroup): ProxyGroup {
-  const id = normalizeGroupId(item.id || item.name || '')
-  return {
-    id,
-    name: String(item.name || item.id || '').trim(),
-    strategy: item.strategy || 'request_random',
-    rotation_interval_minutes: 0,
-    enabled: item.enabled !== false,
-    notes: String(item.notes || '').trim(),
-    subscription_url: String(item.subscription_url || '').trim(),
-    subscription_enabled: item.subscription_enabled === true,
-    subscription_interval_minutes: Math.max(5, Math.min(1440, Number(item.subscription_interval_minutes || 30))),
-    subscription_node_image_concurrency_limit: normalizeImageConcurrencyLimit(
-      item.subscription_node_image_concurrency_limit ?? DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY,
-    ),
-    subscription_last_updated_at: String(item.subscription_last_updated_at || '').trim(),
-    subscription_last_attempt_at: String(item.subscription_last_attempt_at || '').trim(),
-    subscription_last_error: String(item.subscription_last_error || '').trim(),
-    subscription_node_count: Number(item.subscription_node_count || 0),
-    nodes: Array.isArray(item.nodes)
-      ? item.nodes.map(normalizeGroupNode).filter((node) => node.id)
-      : [],
-  }
+function groupFormSignature(form: ProxyGroupForm) {
+  return JSON.stringify({
+    id: cleanProxyGroupDraftId(form.id),
+    name: form.name.trim(),
+    enabled: form.enabled !== false,
+    notes: form.notes.trim(),
+    nodes: form.nodes.map((node) => ({
+      id: cleanProxyGroupDraftId(node.id),
+      name: node.name.trim(),
+      url: node.url.trim(),
+      enabled: node.enabled !== false,
+      image_concurrency_limit: normalizeImageConcurrencyLimit(node.image_concurrency_limit),
+      notes: node.notes.trim(),
+    })),
+  })
 }
 
-export function proxyActionError(action: string, error: unknown) {
-  const message = errorMessage(error, '')
-  return message ? `${action}：${message}` : action
+export function mergeImportedProxyNodes(
+  currentNodes: readonly ProxyGroupNodeForm[],
+  nodes: readonly ProxyNodeImportNode[],
+) {
+  const retainedNodes = currentNodes.length === 1 && !currentNodes[0].url.trim()
+    ? []
+    : [...currentNodes]
+  const importedNodes = nodes.map((node, index) => ({
+    ...createDefaultNode(retainedNodes.length + index),
+    url: node.url,
+    image_concurrency_limit: node.image_concurrency_limit,
+  }))
+  return [...retainedNodes, ...importedNodes]
 }
 
 export function useProxyGroupRuntime() {
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
+  const progressRuntime = useOperationProgressRuntime()
+  const operationProgress = progressRuntime.state
   const savingGroupId = ref('')
   const deletingGroupId = ref('')
-  const refreshingGroupId = ref('')
   const testingKey = ref('')
   const groupKeyword = ref('')
   const showGroupModal = ref(false)
+  const showNodeImportModal = ref(false)
+  const closingGroupModal = ref(false)
   const editingGroupId = ref('')
   const groups = ref<ProxyGroup[]>([])
   const testResults = reactive<Record<string, ProxyTestResult>>({})
   const groupForm = reactive<ProxyGroupForm>(createDefaultGroupForm())
+  const groupFormBaseline = ref(groupFormSignature(groupForm))
+  const isGroupFormDirty = computed(() => (
+    showGroupModal.value && groupFormSignature(groupForm) !== groupFormBaseline.value
+  ))
+  const groupNodeImportExistingUrls = computed(() => (
+    groupForm.nodes.map((node) => node.url.trim()).filter(Boolean)
+  ))
 
   const filteredGroups = computed(() => {
     const query = groupKeyword.value.trim().toLowerCase()
@@ -169,7 +166,18 @@ export function useProxyGroupRuntime() {
   })
 
   function updateGroups(items: ProxyGroup[]) {
-    groups.value = Array.isArray(items) ? items.map(normalizeGroup).filter((item) => item.id) : []
+    groups.value = Array.isArray(items) ? [...items] : []
+  }
+
+  function upsertGroup(item: ProxyGroup) {
+    const index = groups.value.findIndex((group) => group.id === item.id)
+    if (index < 0) {
+      groups.value = [...groups.value, item]
+      return
+    }
+    const next = [...groups.value]
+    next[index] = item
+    groups.value = next
   }
 
   async function copyText(value: string, message = '已复制') {
@@ -195,13 +203,15 @@ export function useProxyGroupRuntime() {
     }
   }
 
-  function copyProxyGroupReference(group: Pick<ProxyGroup, 'id'>) {
+  function copyProxyGroupReference(group: Pick<ProxyGroup, 'id' | 'reference_text'>) {
     void copyText(proxyGroupReference(group), '代理组引用已复制')
   }
 
   function resetGroupForm() {
+    showNodeImportModal.value = false
     editingGroupId.value = ''
     Object.assign(groupForm, createDefaultGroupForm())
+    groupFormBaseline.value = groupFormSignature(groupForm)
   }
 
   function openCreateGroupModal() {
@@ -216,24 +226,42 @@ export function useProxyGroupRuntime() {
       name: group.name || group.id,
       enabled: group.enabled !== false,
       notes: group.notes || '',
-      subscription_url: group.subscription_url || '',
-      subscription_enabled: group.subscription_enabled === true,
-      subscription_interval_minutes: Math.max(5, Math.min(1440, Number(group.subscription_interval_minutes || 30))),
-      subscription_node_image_concurrency_limit: normalizeImageConcurrencyLimit(
-        group.subscription_node_image_concurrency_limit ?? DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY,
-      ),
-      subscription_last_updated_at: group.subscription_last_updated_at || '',
-      subscription_last_error: group.subscription_last_error || '',
-      subscription_node_count: Number(group.subscription_node_count || 0),
       nodes: group.nodes.length ? group.nodes.map((node, index) => normalizeGroupNode(node, index)) : [createDefaultNode(0)],
     })
+    groupFormBaseline.value = groupFormSignature(groupForm)
     showGroupModal.value = true
   }
 
-  function closeGroupModal() {
-    if (savingGroupId.value === FORM_TEST_KEY) return
+  function finishCloseGroupModal() {
     showGroupModal.value = false
     resetGroupForm()
+  }
+
+  async function closeGroupModal() {
+    if (savingGroupId.value === FORM_TEST_KEY || closingGroupModal.value) return
+    if (isGroupFormDirty.value) {
+      closingGroupModal.value = true
+      try {
+        const confirmed = await confirmDialog.ask({
+          title: '放弃代理组草稿',
+          message: '当前代理组有未保存的修改，关闭后这些内容将丢失。是否继续？',
+          confirmText: '放弃修改',
+          cancelText: '继续编辑',
+        })
+        if (!confirmed) return
+      } finally {
+        closingGroupModal.value = false
+      }
+    }
+    finishCloseGroupModal()
+  }
+
+  function openNodeImportModal() {
+    showNodeImportModal.value = true
+  }
+
+  function closeNodeImportModal() {
+    showNodeImportModal.value = false
   }
 
   function addGroupNode() {
@@ -248,74 +276,45 @@ export function useProxyGroupRuntime() {
     groupForm.nodes.splice(index, 1)
   }
 
+  function applyNodeImport(result: ProxyNodeImportResult) {
+    if (result.nodes.length) {
+      groupForm.nodes = mergeImportedProxyNodes(groupForm.nodes, result.nodes)
+    }
+  }
+
   async function saveProxyGroup() {
     const groupName = groupForm.name.trim()
     if (!groupName) {
       toast.warning('请填写代理组名称')
       return
     }
-    const id = normalizeGroupId(editingGroupId.value || groupForm.id) || createGeneratedId('pg')
+    const id = cleanProxyGroupDraftId(editingGroupId.value || groupForm.id) || createGeneratedId('pg')
     const nodes = groupForm.nodes
       .map((node, index) => normalizeGroupNode(node, index))
       .filter((node) => node.url)
-    const subscriptionUrl = groupForm.subscription_url.trim()
-    if (!nodes.length && !subscriptionUrl) {
-      toast.warning('请至少填写一个代理节点地址或订阅 URL')
+    if (!nodes.length) {
+      toast.warning('请至少填写一个代理节点地址')
       return
     }
-
     savingGroupId.value = FORM_TEST_KEY
     try {
       const wasEditing = Boolean(editingGroupId.value)
       const response = await proxyApi.saveGroup({
         id,
         name: groupName,
-        strategy: 'request_random',
         enabled: groupForm.enabled,
         notes: groupForm.notes.trim(),
         nodes,
-        subscription_url: subscriptionUrl,
-        subscription_enabled: Boolean(subscriptionUrl && groupForm.subscription_enabled),
-        subscription_interval_minutes: Math.max(5, Math.min(1440, Number(groupForm.subscription_interval_minutes || 30))),
-        subscription_node_image_concurrency_limit: normalizeImageConcurrencyLimit(
-          groupForm.subscription_node_image_concurrency_limit,
-        ),
         create_only: !editingGroupId.value,
       })
-      updateGroups(response.groups || [])
-      if (subscriptionUrl && groupForm.subscription_enabled) {
-        try {
-          const refreshed = await proxyApi.refreshGroupSubscription(id)
-          updateGroups(refreshed.groups || [])
-          toast.success(`订阅已拉取 ${refreshed.node_count} 个代理节点`)
-        } catch (error) {
-          toast.warning(proxyActionError('代理组已保存，但订阅拉取失败', error))
-        }
-      }
+      upsertGroup(response.group)
       savingGroupId.value = ''
-      closeGroupModal()
+      finishCloseGroupModal()
       toast.success(wasEditing ? '代理组已更新' : '代理组已创建')
     } catch (error) {
-      toast.error(proxyActionError('保存代理组失败', error))
+      toast.error(prefixedErrorMessage('保存代理组失败', error))
     } finally {
       savingGroupId.value = ''
-    }
-  }
-
-  async function refreshProxyGroupSubscription(groupId = editingGroupId.value) {
-    const id = normalizeGroupId(groupId)
-    if (!id) return
-    refreshingGroupId.value = id
-    try {
-      const response = await proxyApi.refreshGroupSubscription(id)
-      updateGroups(response.groups || [])
-      const refreshed = response.groups?.find((group) => group.id === id)
-      if (refreshed && editingGroupId.value === id) openEditGroupModal(refreshed)
-      toast.success(`订阅已更新，共 ${response.node_count} 个代理节点`)
-    } catch (error) {
-      toast.error(proxyActionError('订阅更新失败', error))
-    } finally {
-      refreshingGroupId.value = ''
     }
   }
 
@@ -332,22 +331,24 @@ export function useProxyGroupRuntime() {
     savingGroupId.value = group.id
     try {
       const response = await proxyApi.saveGroup({
-        ...group,
+        id: group.id,
         enabled: nextEnabled,
       })
-      updateGroups(response.groups || [])
+      upsertGroup(response.group)
       toast.success(`代理组 ${group.name || group.id} 已${group.enabled ? '停用' : '启用'}`)
     } catch (error) {
-      toast.error(proxyActionError('切换代理组失败', error))
+      toast.error(prefixedErrorMessage('切换代理组失败', error))
     } finally {
       savingGroupId.value = ''
     }
   }
 
   async function deleteProxyGroup(group: ProxyGroup) {
+    if (group.can_delete === false) return
+
     const confirmed = await confirmDialog.ask({
       title: '删除代理组',
-      message: `确认删除代理组 ${group.name || group.id}？账号组里已有的绑定不会自动清空。`,
+      message: `确认删除代理组 ${group.name || group.id}？该代理组当前未被任何出口、账号组或账号引用，删除后无法恢复。`,
       confirmText: '确认删除',
       cancelText: '取消',
     })
@@ -356,17 +357,13 @@ export function useProxyGroupRuntime() {
     deletingGroupId.value = group.id
     try {
       const response = await proxyApi.deleteGroup(group.id)
-      updateGroups(response.groups || [])
+      groups.value = groups.value.filter((item) => item.id !== response.deleted_id)
       toast.success('代理组已删除')
     } catch (error) {
-      toast.error(proxyActionError('删除代理组失败', error))
+      toast.error(prefixedErrorMessage('删除代理组失败', error))
     } finally {
       deletingGroupId.value = ''
     }
-  }
-
-  function proxyGroupActionItems(group: ProxyGroup) {
-    return buildProxyGroupActionItems(group, testingKey.value, savingGroupId.value, deletingGroupId.value)
   }
 
   function handleProxyGroupAction(group: ProxyGroup, action: string) {
@@ -375,20 +372,26 @@ export function useProxyGroupRuntime() {
     if (action === 'delete') void deleteProxyGroup(group)
   }
 
-  async function testProxyGroupNode(group: Pick<ProxyGroup, 'id' | 'name'>, node: ProxyNode) {
+  async function testProxyGroupNode(group: Pick<ProxyGroup, 'id' | 'name'>, node: ProxyGroupNodeForm | ProxyNode) {
+    const value = node.url.trim()
+    if (!value) {
+      toast.warning(`${node.name || node.id}：请先填写代理地址`)
+      return
+    }
+    const groupLabel = group.name || (group.id === FORM_TEST_KEY ? '当前草稿' : group.id)
     const confirmed = await confirmDialog.ask({
       title: '确认测试代理节点',
-      message: `即将使用代理组 ${group.name || group.id} 的节点 ${node.name || node.id} 发起外部网络测试请求。请确认当前允许测试该代理连接。`,
+      message: `即将使用代理组 ${groupLabel} 的节点 ${node.name || node.id} 发起外部网络测试请求。请确认当前允许测试该代理连接。`,
       confirmText: '开始测试',
       cancelText: '取消',
     })
     if (!confirmed) return
 
-    const key = `group:${group.id}:${node.id}`
+    const groupKey = group.id || FORM_TEST_KEY
+    const key = `group:${groupKey}:${node.id}`
     testingKey.value = key
     try {
-      const response = await proxyApi.testGroup({ id: group.id, node_id: node.id })
-      if (response.groups) updateGroups(response.groups)
+      const response = await proxyApi.testGroup({ url: value })
       const result = response.result || response.results?.[0]?.result
       if (result) testResults[key] = result
       if (result?.ok) toast.success(`节点检测通过，耗时 ${result.latency_ms}ms`)
@@ -418,20 +421,29 @@ export function useProxyGroupRuntime() {
 
     const key = `group:${group.id}:all`
     testingKey.value = key
+    await progressRuntime.start({
+      title: '检测代理组节点',
+      subtitle: group.name || group.id,
+      total: group.nodes.length,
+      message: `正在检测 ${group.nodes.length} 个节点...`,
+    })
     try {
       const response = await proxyApi.testGroup({ id: group.id })
-      if (response.groups) updateGroups(response.groups)
       const results = response.results || []
       for (const item of results) {
         if (item.node_id && item.result) {
           testResults[`group:${group.id}:${item.node_id}`] = item.result
         }
       }
-      const failed = results.filter((item) => !item.result.ok)
-      if (failed.length) toast.warning(`代理组检测完成，失败 ${failed.length} 个节点`)
-      else toast.success(`代理组检测通过，共 ${results.length} 个节点`)
+      if (response.summary.tone === 'success') {
+        progressRuntime.succeed(response.summary.message, response.summary.total)
+      } else if (response.summary.tone === 'warning') {
+        progressRuntime.warn(response.summary.message, response.summary.total)
+      } else {
+        progressRuntime.fail(response.summary.message, response.summary.total)
+      }
     } catch (error) {
-      toast.error(errorMessage(error, '代理组检测失败'))
+      progressRuntime.fail(errorMessage(error, '代理组检测失败'))
     } finally {
       testingKey.value = ''
     }
@@ -448,31 +460,31 @@ export function useProxyGroupRuntime() {
   return {
     savingGroupId,
     deletingGroupId,
-    refreshingGroupId,
     testingKey,
+    operationProgress,
+    closeOperationProgress: progressRuntime.close,
     groupKeyword,
     showGroupModal,
+    showNodeImportModal,
+    closingGroupModal,
     editingGroupId,
     groups,
-    testResults,
     groupForm,
+    groupNodeImportExistingUrls,
     filteredGroups,
     updateGroups,
-    proxyActionError,
-    normalizeGroupId,
-    normalizeImageConcurrencyLimit,
     copyProxyGroupReference,
     openCreateGroupModal,
     openEditGroupModal,
     closeGroupModal,
+    openNodeImportModal,
+    closeNodeImportModal,
     addGroupNode,
     removeGroupNode,
+    applyNodeImport,
     saveProxyGroup,
-    refreshProxyGroupSubscription,
-    proxyGroupActionItems,
     handleProxyGroupAction,
     testProxyGroupNode,
-    testProxyGroupAll,
     nodeTestSummary,
     nodeTestClass,
   }

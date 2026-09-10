@@ -3,8 +3,8 @@ export const preferenceKeys = {
   accountsViewMode: 'accounts-view-mode',
   accountsPageSize: 'accounts-page-size',
   systemLogLimit: 'system-log-limit',
-  runtimeLogLimit: 'runtime-log-limit',
   galleryPageSize: 'gallery-page-size',
+  listLayoutMode: 'list-layout-mode',
   publicLogFoldState: 'public-log-fold-state',
   imageTaskLocalIds: 'image-task-local-ids',
   imageTaskConversations: 'image-task-conversations',
@@ -16,9 +16,12 @@ export const preferenceKeys = {
   studioConversationBadges: 'studio-conversation-badges',
   studioConversations: 'studio-conversations',
   studioFullscreen: 'studio-fullscreen',
+  studioFileKind: 'studio-file-kind',
   studioImageModel: 'studio-image-model',
   studioSidebarWidth: 'studio-sidebar-width',
   themeMode: 'theme-mode',
+  updateActiveTaskId: 'update-active-task-id',
+  updateDismissedTag: 'update-dismissed-tag',
 } as const
 
 type PreferenceKey = typeof preferenceKeys[keyof typeof preferenceKeys]

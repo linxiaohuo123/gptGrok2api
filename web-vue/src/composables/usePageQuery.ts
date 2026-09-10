@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
+import { computed, ref, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref } from 'vue'
 import { errorMessage } from '@/lib/errorMessage'
 
 import type { usePageRuntime } from '@/composables/usePageRuntime'
@@ -12,6 +12,7 @@ type PageQueryOptions = {
   loading?: Ref<boolean>
   error?: Ref<string>
   errorMessage?: PageQueryErrorMessage
+  isEmpty?: () => boolean
   requireVisible?: boolean
 }
 
@@ -47,6 +48,13 @@ type SerialVisibilityPollingOptions = VisibilityPollingOptions & {
   immediate?: boolean
 }
 
+type PageVisibilityReloadOptions = {
+  runtime: PageRuntime
+  invalidate: () => void
+  reload: () => Promise<void> | void
+  shouldReload?: MaybeRefOrGetter<boolean>
+}
+
 type PagedQueryOptions<T> = PageQueryOptions & {
   pageSize: Ref<number>
   initialPage?: number
@@ -74,7 +82,13 @@ function resolveErrorMessage(error: unknown, message?: PageQueryErrorMessage): s
 export function usePageQuery(options: PageQueryOptions) {
   const loading = options.loading ?? ref(false)
   const error = options.error ?? ref('')
+  const hasResolved = ref(false)
+  const hasSnapshot = ref(false)
   let loadingSeq = 0
+
+  const isInitialLoading = computed(() => loading.value && !hasResolved.value)
+  const isRefreshing = computed(() => loading.value && hasSnapshot.value)
+  const isEmpty = computed(() => hasSnapshot.value && Boolean(options.isEmpty?.()))
 
   function isLatest(requestSeq: number, requireVisible = options.requireVisible) {
     return options.runtime.isLatestRequest(options.key, requestSeq, { requireVisible })
@@ -100,6 +114,7 @@ export function usePageQuery(options: PageQueryOptions) {
       const value = await task()
       if (!isLatest(requestSeq, runOptions.requireVisible)) return undefined
       runOptions.apply?.(value)
+      hasSnapshot.value = true
       return value
     } catch (caught) {
       if (!isLatest(requestSeq, runOptions.requireVisible)) return undefined
@@ -115,6 +130,7 @@ export function usePageQuery(options: PageQueryOptions) {
         loading.value = false
         loadingSeq = 0
       }
+      if (latest) hasResolved.value = true
       runOptions.onSettled?.(latest)
     }
   }
@@ -128,9 +144,48 @@ export function usePageQuery(options: PageQueryOptions) {
   return {
     loading,
     error,
+    hasResolved,
+    isInitialLoading,
+    isRefreshing,
+    hasSnapshot,
+    isEmpty,
     run,
     invalidate,
     isLatest,
+  }
+}
+
+export function usePageVisibilityReload(options: PageVisibilityReloadOptions) {
+  let reloadPending = !options.runtime.isVisible.value
+
+  function invalidateForHide() {
+    reloadPending = true
+    options.invalidate()
+  }
+
+  function reloadIfPending() {
+    if (!reloadPending || !options.runtime.canRun.value) return false
+    if (options.shouldReload !== undefined && !toValue(options.shouldReload)) return false
+    reloadPending = false
+    void options.reload()
+    return true
+  }
+
+  options.runtime.onHide(invalidateForHide)
+  options.runtime.onShow(reloadIfPending)
+  if (options.shouldReload !== undefined) {
+    watch(
+      () => toValue(options.shouldReload as MaybeRefOrGetter<boolean>),
+      (shouldReload) => {
+        if (shouldReload) reloadIfPending()
+      },
+      { flush: 'sync' },
+    )
+  }
+
+  return {
+    invalidateForHide,
+    reloadIfPending,
   }
 }
 
@@ -300,8 +355,9 @@ export function useVisibilityPolling(options: VisibilityPollingOptions) {
 }
 
 export function useSerialVisibilityPolling(options: SerialVisibilityPollingOptions) {
-  let running = false
   let active = false
+  let generation = 0
+  let runningGeneration: number | null = null
 
   function intervalMs() {
     const value = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs
@@ -312,15 +368,15 @@ export function useSerialVisibilityPolling(options: SerialVisibilityPollingOptio
     return active && options.runtime.canRun.value && (options.enabled?.() ?? true)
   }
 
-  async function tick() {
+  async function tick(expectedGeneration = generation) {
     options.runtime.clearTimer(options.key)
-    if (!canRun() || running) return
-    running = true
+    if (!canRun() || expectedGeneration !== generation || runningGeneration === expectedGeneration) return
+    runningGeneration = expectedGeneration
     try {
       await options.action()
     } finally {
-      running = false
-      schedule()
+      if (runningGeneration === expectedGeneration) runningGeneration = null
+      if (expectedGeneration === generation) schedule()
     }
   }
 
@@ -333,6 +389,7 @@ export function useSerialVisibilityPolling(options: SerialVisibilityPollingOptio
   }
 
   function start() {
+    generation += 1
     active = true
     options.runtime.clearTimer(options.key)
     if (!canRun()) return
@@ -344,6 +401,7 @@ export function useSerialVisibilityPolling(options: SerialVisibilityPollingOptio
   }
 
   function stop() {
+    generation += 1
     active = false
     options.runtime.clearTimer(options.key)
   }

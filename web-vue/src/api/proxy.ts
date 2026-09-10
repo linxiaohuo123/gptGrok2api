@@ -3,38 +3,18 @@ import type { ClearanceTestResult, ProxyRuntimeSettings, ProxyRuntimeStatus } fr
 
 export interface ProxyTestResult {
   ok: boolean
-  reachable?: boolean
-  verification?: 'probe_ok' | 'api_required' | 'failed'
-  status_label?: string
   status: number
   latency_ms: number
   error?: string | null
+  proxy_source?: string
+  has_proxy?: boolean
 }
 
-export interface ProxySampleAttempt extends ProxyTestResult {
-  scheme: string
-}
-
-export interface ProxySampleTestResult extends ProxyTestResult {
-  scheme: string
-  sample_index: number
-  sample_count: number
-  attempts: ProxySampleAttempt[]
-  normalized_urls?: string
-  normalized_changed?: boolean
-}
-
-export interface ProxyProfile {
-  id: string
-  name: string
-  proxy: string
-  no_proxy?: string
-  enabled: boolean
-  notes?: string
-}
-
-export type ProxyProfilePayload = Partial<ProxyProfile> & {
-  create_only?: boolean
+export interface ProxyHealth {
+  state: 'unknown' | 'healthy' | 'unhealthy'
+  checked_at: string | null
+  latency_ms: number | null
+  error: string | null
 }
 
 export interface ProxyNode {
@@ -42,67 +22,115 @@ export interface ProxyNode {
   name: string
   url: string
   enabled: boolean
-  image_concurrency_limit?: number
-  last_status?: number
-  last_latency_ms?: number
-  fail_count?: number
-  last_error?: string
-  last_checked_at?: string
-  last_error_at?: string
-  last_verification?: string
-  last_status_label?: string
-  cooldown_until?: string
-  notes?: string
-  source?: string
-  subscription_managed?: boolean
+  image_concurrency_limit: number
+  notes: string
+  health: ProxyHealth
 }
 
 export interface ProxyGroup {
   id: string
   name: string
   strategy: 'request_random' | 'time_window' | 'round_robin'
-  rotation_interval_minutes?: number
+  rotation_interval_minutes: number
   enabled: boolean
-  notes?: string
+  notes: string
   nodes: ProxyNode[]
-  subscription_url?: string
-  subscription_enabled?: boolean
-  subscription_interval_minutes?: number
-  subscription_node_image_concurrency_limit?: number
-  subscription_last_updated_at?: string
-  subscription_last_attempt_at?: string
-  subscription_last_error?: string
-  subscription_node_count?: number
+  reference_text: string
+  health: ProxyHealth
+  can_delete: boolean
+  references: string[]
 }
 
-export type ProxyGroupPayload = Partial<ProxyGroup> & {
+export interface ProxyNodePayload {
+  id?: string
+  name?: string
+  url?: string
+  enabled?: boolean
+  image_concurrency_limit?: number | string | null
+  notes?: string
+}
+
+export type ProxyGroupPayload = {
+  id?: string
+  name?: string
+  strategy?: ProxyGroup['strategy']
+  rotation_interval_minutes?: number
+  enabled?: boolean
+  notes?: string
+  nodes?: ProxyNodePayload[]
   create_only?: boolean
 }
 
-export type ProxyReferenceMode = 'global' | 'direct' | 'profile' | 'group' | 'custom'
+export type LegacyProxyReferenceMode = 'global' | 'direct' | 'profile' | 'group' | 'custom'
 
 export interface ProxyReference {
-  mode: ProxyReferenceMode
-  value: string
+  mode: 'direct' | 'group' | 'custom'
+  group_id: string
+  url: string
+}
+
+export interface ProxyEffectiveReference {
+  source: 'disabled' | 'direct' | 'group' | 'custom' | 'profile'
+  label: string
+  configured: boolean
+  available: boolean
+  has_proxy: boolean
+  group_id: string
+}
+
+export interface ProxyView {
+  schema_version: number
+  generated_at: string
+  revision: string
+  default_reference: ProxyReference
+  fallback_reference: ProxyReference | null
+  effective_default: ProxyEffectiveReference
+  effective_fallback: ProxyEffectiveReference
+  groups: ProxyGroup[]
+}
+
+export type ProxyTestStatus = 'success' | 'partial' | 'failed'
+export type ProxyTestTone = 'success' | 'warning' | 'danger'
+
+export interface ProxyTestSummary {
+  status: ProxyTestStatus
+  tone: ProxyTestTone
+  total: number
+  succeeded: number
+  failed: number
+  max_latency_ms: number
+  label: string
+  message: string
+}
+
+export interface ProxyGroupTestResponse {
+  summary: ProxyTestSummary
+  results: Array<{ node_id: string; result: ProxyTestResult }>
+  result: ProxyTestResult | null
+}
+
+export interface ProxyNodeImportNode {
+  url: string
+  image_concurrency_limit: number
+}
+
+export interface ProxyNodeImportInvalidItem {
+  line: number
+  raw: string
+  reason: string
+}
+
+export interface ProxyNodeImportResult {
+  nodes: ProxyNodeImportNode[]
+  added_count: number
+  duplicate_count: number
+  invalid_count: number
+  invalid_items: ProxyNodeImportInvalidItem[]
 }
 
 export type { ClearanceTestResult, ProxyRuntimeSettings, ProxyRuntimeStatus }
 
-export function parseProxyReference(value: unknown): ProxyReference {
-  const raw = String(value || '').trim()
-  const lower = raw.toLowerCase()
-  if (!raw) return { mode: 'global', value: '' }
-  if (lower === 'direct') return { mode: 'direct', value: '' }
-  if (lower.startsWith('profile:')) {
-    return { mode: 'profile', value: raw.slice('profile:'.length).trim() }
-  }
-  if (lower.startsWith('group:')) {
-    return { mode: 'group', value: raw.slice('group:'.length).trim() }
-  }
-  return { mode: 'custom', value: raw }
-}
-
-export function serializeProxyReference(mode: ProxyReferenceMode, value = ''): string {
+export function serializeProxyReference(mode: LegacyProxyReferenceMode, value = ''): string {
   const raw = String(value || '').trim()
   if (mode === 'global') return ''
   if (mode === 'direct') return 'direct'
@@ -111,67 +139,38 @@ export function serializeProxyReference(mode: ProxyReferenceMode, value = ''): s
   return raw
 }
 
-export function proxyReferenceLabel(value: unknown): string {
-  const reference = parseProxyReference(value)
-  if (reference.mode === 'global') return '使用默认出口'
-  if (reference.mode === 'direct') return '直连'
-  if (reference.mode === 'profile') return `历史代理配置 ${reference.value || '-'}`
-  if (reference.mode === 'group') return `代理组 ${reference.value || '-'}`
-  return reference.value
-}
-
 export const proxyApi = {
   test: (url: string) =>
     apiClient.post<{ url: string }, { result: ProxyTestResult }>('/api/proxy/test', { url }),
 
-  testSample: (urls: string) =>
-    apiClient.post<{ urls: string }, { result: ProxySampleTestResult }>('/api/proxy/sample-test', { urls }),
+  getView: () =>
+    apiClient.get<never, ProxyView>('/api/proxy/view'),
 
-  listProfiles: () =>
-    apiClient.get<never, { profiles: ProxyProfile[] }>('/api/proxy/profiles'),
-
-  saveProfile: (payload: ProxyProfilePayload) =>
-    apiClient.post<ProxyProfilePayload, { profile: ProxyProfile; profiles: ProxyProfile[] }>(
-      '/api/proxy/profiles',
-      payload,
-    ),
-
-  deleteProfile: (id: string) =>
-    apiClient.delete<never, { deleted: string; profiles: ProxyProfile[] }>(
-      `/api/proxy/profiles/${encodeURIComponent(id)}`,
-    ),
-
-  testProfile: (payload: { id?: string; url?: string }) =>
-    apiClient.post<{ id?: string; url?: string }, { result: ProxyTestResult }>(
-      '/api/proxy/profiles/test',
-      payload,
-    ),
-
-  listGroups: () =>
-    apiClient.get<never, { groups: ProxyGroup[] }>('/api/proxy/groups'),
+  saveDefaults: (payload: { default_reference: ProxyReference; fallback_reference: ProxyReference | null }) =>
+    apiClient.post<typeof payload, {
+      default_reference: ProxyReference
+      fallback_reference: ProxyReference | null
+      effective_default: ProxyEffectiveReference
+      effective_fallback: ProxyEffectiveReference
+      revision: string
+    }>('/api/proxy/defaults', payload),
 
   saveGroup: (payload: ProxyGroupPayload) =>
-    apiClient.post<ProxyGroupPayload, { group: ProxyGroup; groups: ProxyGroup[] }>(
+    apiClient.post<ProxyGroupPayload, { group: ProxyGroup; revision: string }>(
       '/api/proxy/groups',
       payload,
     ),
 
   deleteGroup: (id: string) =>
-    apiClient.delete<never, { deleted: string; groups: ProxyGroup[] }>(
+    apiClient.delete<never, { deleted_id: string; revision: string }>(
       `/api/proxy/groups/${encodeURIComponent(id)}`,
     ),
 
   testGroup: (payload: { id?: string; node_id?: string; url?: string }) =>
     apiClient.post<
       { id?: string; node_id?: string; url?: string },
-      { result?: ProxyTestResult | null; results?: Array<{ node_id: string; result: ProxyTestResult }>; groups?: ProxyGroup[] }
+      ProxyGroupTestResponse
     >('/api/proxy/groups/test', payload),
-
-  refreshGroupSubscription: (id: string) =>
-    apiClient.post<Record<string, never>, { group: ProxyGroup; groups: ProxyGroup[]; node_count: number }>(
-      `/api/proxy/groups/${encodeURIComponent(id)}/subscription/refresh`,
-      {},
-    ),
 
   getRuntime: () =>
     apiClient.get<never, { runtime: ProxyRuntimeSettings; status: ProxyRuntimeStatus }>('/api/proxy/runtime'),
@@ -180,5 +179,11 @@ export const proxyApi = {
     apiClient.post<{ target_url: string }, { result: ClearanceTestResult }>(
       '/api/proxy/clearance/test',
       { target_url: targetUrl },
+    ),
+
+  importNodes: (payload: { text: string; existing_urls?: string[] }) =>
+    apiClient.post<typeof payload, ProxyNodeImportResult>(
+      '/api/proxy/nodes/import',
+      payload,
     ),
 }

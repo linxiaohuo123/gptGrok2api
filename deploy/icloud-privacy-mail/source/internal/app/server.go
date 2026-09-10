@@ -4444,7 +4444,6 @@ func (s *Server) publicMailbox(r *http.Request, mailbox Mailbox) publicMailbox {
 		ICloudActive:   mailbox.ICloudActive,
 		ReceiveCount:   mailbox.ReceiveCount,
 		OpenAIClaimed:  mailbox.OpenAIClaimed,
-		GrokClaimed:    mailbox.GrokClaimed,
 		Status:         mailbox.Status,
 		Note:           mailbox.Note,
 		LastSyncAt:     formatTime(mailbox.LastSyncAt),
@@ -4742,15 +4741,11 @@ func parseAfter(value string) (time.Time, error) {
 }
 
 var (
-	xaiOTPRegex     = regexp.MustCompile(`(?i)\b([a-z0-9]{3}-[a-z0-9]{3})\b`)
 	contextOTPRegex = regexp.MustCompile(`(?i)(?:openai|chatgpt|otp|code|verification|验证码|验证|代码)[^\d]{0,80}(\d{6})`)
 	plainOTPRegex   = regexp.MustCompile(`\b(\d{6})\b`)
 )
 
 func extractOTP(text string) string {
-	if matches := xaiOTPRegex.FindStringSubmatch(text); len(matches) == 2 && validOTP(matches[1]) {
-		return strings.ToUpper(matches[1])
-	}
 	if matches := contextOTPRegex.FindStringSubmatch(text); len(matches) == 2 && validOTP(matches[1]) {
 		return matches[1]
 	}

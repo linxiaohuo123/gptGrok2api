@@ -4,7 +4,7 @@
       <div class="studio-mobile-history">
         <div class="studio-mobile-history-header">
           <p>历史记录</p>
-          <ModalCloseButton label="关闭历史记录" @click="$emit('close')" />
+          <CloseButton label="关闭历史记录" @click="$emit('close')" />
         </div>
         <div ref="historyListRef" class="studio-mobile-history-list custom-scrollbar" @scroll="handleWindowScroll">
           <div
@@ -61,7 +61,7 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
 import { computed, nextTick, ref, watch } from 'vue'
-import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
+import { CloseButton } from 'nanocat-ui'
 import { useWindowedList } from '@/composables/useWindowedList'
 import type { StudioConversation, StudioConversationBadge } from './types'
 

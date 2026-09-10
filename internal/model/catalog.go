@@ -1,6 +1,14 @@
+// [INPUT]: 仅标准库（strings, time）
+// [OUTPUT]: 模型目录：Catalog、Find、Spec、IsImageModel
+// [POS]: 对外模型清单的唯一来源，含 gpt-image-2.5 与 Codex 图像模型家族。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Capability uint8
 
@@ -8,8 +16,6 @@ const (
 	Chat Capability = 1 << iota
 	Image
 	ImageEdit
-	Video
-	ConsoleChat
 )
 
 type Spec struct {
@@ -46,34 +52,14 @@ func Catalog() []Spec {
 		{"gpt-5-6-terra", "GPT-5.6 Terra", "openai", created, Chat, true},
 		{"gpt-5-6-luna", "GPT-5.6 Luna", "openai", created, Chat, true},
 		{"gpt-5-mini", "GPT-5 Mini", "openai", created, Chat, true},
-		{"grok-4.20-0309-non-reasoning", "Grok 4.20 0309 Non-Reasoning", "xai", created, Chat, true},
-		{"grok-4.20-0309", "Grok 4.20 0309", "xai", created, Chat, true},
-		{"grok-4.20-0309-reasoning", "Grok 4.20 0309 Reasoning", "xai", created, Chat, true},
-		{"grok-4.20-fast", "Grok 4.20 Fast", "xai", created, Chat, true},
-		{"grok-4.3-fast", "Grok 4.3 Fast", "xai", created, Chat, true},
-		{"grok-4.20-auto", "Grok 4.20 Auto", "xai", created, Chat, true},
-		{"grok-4.20-expert", "Grok 4.20 Expert", "xai", created, Chat, true},
-		{"grok-4.20-heavy", "Grok 4.20 Heavy", "xai", created, Chat, true},
-		{"grok-4.3-beta", "Grok 4.3 Beta", "xai", created, Chat, true},
-		{"grok-imagine-image-lite", "Grok Imagine Image Lite", "xai", created, Image, true},
 		{"gpt-image-2", "GPT Image 2", "openai-compatible", created, Image, true},
-		{"grok-imagine-image", "Grok Imagine Image", "xai", created, Image, true},
-		{"grok-imagine-image-pro", "Grok Imagine Image Pro", "xai", created, Image, true},
-		{"grok-imagine-image-edit", "Grok Imagine Image Edit", "xai", created, ImageEdit, true},
-		{"grok-imagine-video", "Grok Imagine Video", "xai", created, Video, true},
-		{"grok-4.3-console", "Grok 4.3 (Console)", "xai", created, ConsoleChat, true},
-		{"grok-4.3-low", "Grok 4.3 Low Thinking", "xai", created, ConsoleChat, true},
-		{"grok-4.3-medium", "Grok 4.3 Medium Thinking", "xai", created, ConsoleChat, true},
-		{"grok-4.3-high", "Grok 4.3 High Thinking", "xai", created, ConsoleChat, true},
-		{"grok-4.20-0309-reasoning-console", "Grok 4.20 0309 Reasoning (Console)", "xai", created, ConsoleChat, true},
-		{"grok-4.20-0309-console", "Grok 4.20 0309 (Console)", "xai", created, ConsoleChat, true},
-		{"grok-4.20-multi-agent-console", "Grok 4.20 Multi-Agent (Console)", "xai", created, ConsoleChat, true},
-		{"grok-4.20-multi-agent-low", "Grok 4.20 Multi-Agent Low", "xai", created, ConsoleChat, true},
-		{"grok-4.20-multi-agent-medium", "Grok 4.20 Multi-Agent Medium", "xai", created, ConsoleChat, true},
-		{"grok-4.20-multi-agent-high", "Grok 4.20 Multi-Agent High", "xai", created, ConsoleChat, true},
-		{"grok-4.20-multi-agent-xhigh", "Grok 4.20 Multi-Agent XHigh", "xai", created, ConsoleChat, true},
-		{"grok-4.20-0309-non-reasoning-console", "Grok 4.20 0309 Non-Reasoning (Console)", "xai", created, ConsoleChat, true},
-		{"grok-build-console", "Grok Build 0.1 (Console)", "xai", created, ConsoleChat, true},
+		{"gpt-image-2.5", "GPT Image 2.5", "openai-compatible", created, Image, true},
+		{"gpt-image-2.5-flare", "GPT Image 2.5 Flare", "openai-compatible", created, Image, true},
+		{"gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst", "openai-compatible", created, Image, true},
+		{"codex-gpt-image-2", "Codex GPT Image 2", "openai-compatible", created, Image, true},
+		{"plus-codex-gpt-image-2", "Plus Codex GPT Image 2", "openai-compatible", created, Image, true},
+		{"team-codex-gpt-image-2", "Team Codex GPT Image 2", "openai-compatible", created, Image, true},
+		{"pro-codex-gpt-image-2", "Pro Codex GPT Image 2", "openai-compatible", created, Image, true},
 	}
 	return items
 }
@@ -85,4 +71,20 @@ func Find(items []Spec, id string) (Spec, bool) {
 		}
 	}
 	return Spec{}, false
+}
+
+func IsImageModel(id string) bool {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "gpt-image-2",
+		"gpt-image-2.5",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
+		"codex-gpt-image-2",
+		"plus-codex-gpt-image-2",
+		"team-codex-gpt-image-2",
+		"pro-codex-gpt-image-2":
+		return true
+	default:
+		return false
+	}
 }

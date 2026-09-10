@@ -141,11 +141,17 @@ func TestAuthProtocolUsesBearerHeaderAndSoftStatusProbe(t *testing.T) {
 	if loginResponse.Code != http.StatusOK || !strings.Contains(loginResponse.Body.String(), `"role":"admin"`) {
 		t.Fatalf("unexpected login response: %d %s", loginResponse.Code, loginResponse.Body.String())
 	}
+	if !strings.Contains(loginResponse.Body.String(), `"subject"`) || !strings.Contains(loginResponse.Body.String(), `"capabilities"`) {
+		t.Fatalf("login response missing subject or capabilities for Vue frontend: %s", loginResponse.Body.String())
+	}
 
 	statusResponse := httptest.NewRecorder()
 	handler.ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/auth/status", nil))
 	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"authenticated":false`) {
 		t.Fatalf("unexpected unauthenticated status response: %d %s", statusResponse.Code, statusResponse.Body.String())
+	}
+	if !strings.Contains(statusResponse.Body.String(), `"schema_version":1`) {
+		t.Fatalf("status response missing schema_version: %s", statusResponse.Body.String())
 	}
 }
 

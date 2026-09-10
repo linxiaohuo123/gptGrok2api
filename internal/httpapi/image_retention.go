@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（os、filepath、time）
+// [OUTPUT]: 图片过期清理：imageRetentionScheduler、cleanupExpiredImages
+// [POS]: 按保留天数定期清理图片与元数据。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (

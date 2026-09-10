@@ -13,9 +13,9 @@ export interface UserKeysResponse {
   items: UserKey[]
 }
 
-export interface UserKeyCreateResponse extends UserKeysResponse {
+export interface UserKeyCreateResponse {
   item: UserKey
-  key: string
+  raw_key: string
 }
 
 export interface UserKeyUpdatePayload {
@@ -24,8 +24,12 @@ export interface UserKeyUpdatePayload {
   key?: string
 }
 
-export interface UserKeyUpdateResponse extends UserKeysResponse {
+export interface UserKeyUpdateResponse {
   item: UserKey
+}
+
+export interface UserKeyDeleteResponse {
+  deleted_id: string
 }
 
 export const userKeysApi = {
@@ -38,5 +42,5 @@ export const userKeysApi = {
     apiClient.post<UserKeyUpdatePayload, UserKeyUpdateResponse>(`/api/auth/users/${keyId}`, updates),
 
   delete: (keyId: string) =>
-    apiClient.delete<never, UserKeysResponse>(`/api/auth/users/${keyId}`),
+    apiClient.delete<never, UserKeyDeleteResponse>(`/api/auth/users/${keyId}`),
 }

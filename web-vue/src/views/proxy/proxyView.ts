@@ -1,9 +1,16 @@
 import type { ActionMenuItem } from 'nanocat-ui'
-import { parseProxyReference, serializeProxyReference, type ProxyGroup, type ProxyNode, type ProxyTestResult } from '@/api/proxy'
+import type { ProxyGroup, ProxyNode, ProxyTestResult, ProxyTestTone } from '@/api/proxy'
 import { actionMenuGroups } from '@/components/ai/menuItems'
 
 export type DefaultProxyMode = 'direct' | 'group' | 'custom'
-export type FallbackProxyMode = 'off' | DefaultProxyMode
+export type FallbackProxyMode = 'off' | 'direct' | 'group' | 'custom'
+export type ProxyTestSummaryTone = 'success' | 'warning' | 'error'
+
+export function proxyTestToastType(tone: ProxyTestTone): ProxyTestSummaryTone {
+  if (tone === 'success') return 'success'
+  if (tone === 'warning') return 'warning'
+  return 'error'
+}
 
 export const defaultProxyModeOptions = [
   { label: '直连', value: 'direct' },
@@ -31,8 +38,8 @@ export function toFallbackProxyMode(value: string | string[]): FallbackProxyMode
   return fallbackProxyModes.has(raw) ? raw as FallbackProxyMode : 'off'
 }
 
-export function proxyGroupReference(group: Pick<ProxyGroup, 'id'>) {
-  return serializeProxyReference('group', group.id)
+export function proxyGroupReference(group: Pick<ProxyGroup, 'reference_text'>) {
+  return group.reference_text
 }
 
 function signatureValue(value: unknown): string {
@@ -52,15 +59,10 @@ function proxyNodeSignature(node: ProxyNode) {
     boundedSignatureText(node.url, 96),
     node.enabled !== false ? 1 : 0,
     node.image_concurrency_limit,
-    node.last_status,
-    node.last_latency_ms,
-    node.fail_count,
-    boundedSignatureText(node.last_error),
-    node.last_checked_at,
-    node.last_error_at,
-    node.last_verification,
-    node.last_status_label,
-    node.cooldown_until,
+    node.health.state,
+    node.health.latency_ms,
+    boundedSignatureText(node.health.error),
+    node.health.checked_at,
     boundedSignatureText(node.notes),
   ].map(signatureValue).join(',')
 }
@@ -79,6 +81,8 @@ export function proxyGroupRowSignature(group: ProxyGroup, testingKey: string, sa
     group.rotation_interval_minutes,
     boundedSignatureText(group.notes),
     group.nodes.map(proxyNodeSignature).join(';'),
+    group.can_delete ? 1 : 0,
+    group.references.map((reference) => boundedSignatureText(reference, 96)).join(','),
     testingKeyForGroup(group, testingKey),
     savingGroupId === group.id ? savingGroupId : '',
     deletingGroupId === group.id ? deletingGroupId : '',
@@ -112,9 +116,13 @@ export function proxyGroupActionItems(
     [
       {
         key: 'delete',
-        label: deletingGroupId === group.id ? '删除中...' : '删除代理组',
+        label: deletingGroupId === group.id
+          ? '删除中...'
+          : group.can_delete
+            ? '删除代理组'
+            : `不可删除 · ${group.references.join('、') || '正在使用'}`,
         danger: true,
-        disabled: deletingGroupId === group.id,
+        disabled: deletingGroupId === group.id || !group.can_delete,
       },
     ],
   )
@@ -152,14 +160,6 @@ export function buildProxyPreview(
   return customInput || '自定义代理：未填写'
 }
 
-export function normalizeDefaultProxyForCompare(value: unknown) {
-  const reference = parseProxyReference(value)
-  if (reference.mode === 'global' || reference.mode === 'direct') return 'direct'
-  if (reference.mode === 'group') return serializeProxyReference('group', reference.value)
-  if (reference.mode === 'profile') return String(value || '').trim()
-  return reference.value.trim()
-}
-
 export function proxyNodeTestKey(group: Pick<ProxyGroup, 'id'>, node: Pick<ProxyNode, 'id'>) {
   return `group:${group.id}:${node.id}`
 }
@@ -176,20 +176,10 @@ export function proxyNodeTestSummary(
 ) {
   if (isProxyNodeTesting(group, node, testingKey)) return '检测中...'
   const result = testResults[proxyNodeTestKey(group, node)]
-  if (result?.verification === 'api_required') return `HTTP 403 · ${result.latency_ms || 0}ms · 需真实图片验证`
   if (result?.ok) return `HTTP ${result.status || '-'} · ${result.latency_ms || 0}ms`
-  if (result && !result.ok) {
-    if (result.status) return `HTTP ${result.status} · ${result.latency_ms || 0}ms`
-    return result.error || '检测失败'
-  }
-  if (node.last_verification === 'api_required' || node.last_status === 403) {
-    return `HTTP 403 · ${node.last_latency_ms || 0}ms · 需真实图片验证`
-  }
-  if (node.last_error) {
-    if (node.last_status) return `HTTP ${node.last_status} · ${node.last_latency_ms || 0}ms`
-    return node.last_error
-  }
-  if (node.last_checked_at) return `HTTP ${node.last_status || '-'} · ${node.last_latency_ms || 0}ms`
+  if (result && !result.ok) return result.error || '检测失败'
+  if (node.health.state === 'unhealthy') return node.health.error || '检测失败'
+  if (node.health.state === 'healthy') return `${node.health.latency_ms || 0}ms`
   return '尚未测试'
 }
 
@@ -201,10 +191,8 @@ export function proxyNodeTestClass(
 ) {
   if (isProxyNodeTesting(group, node, testingKey)) return 'text-sky-600'
   const result = testResults[proxyNodeTestKey(group, node)]
-  if (result?.verification === 'api_required') return 'text-amber-600'
   if (result) return result.ok ? 'text-emerald-600' : 'text-rose-600'
-  if (node.last_verification === 'api_required' || node.last_status === 403) return 'text-amber-600'
-  if (node.last_error) return 'text-rose-600'
-  if (node.last_checked_at) return 'text-emerald-600'
+  if (node.health.state === 'unhealthy') return 'text-rose-600'
+  if (node.health.state === 'healthy') return 'text-emerald-600'
   return 'text-muted-foreground'
 }

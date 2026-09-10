@@ -43,7 +43,6 @@ echo "ACTIONS"
 call POST /api/image-tasks "$API" '{"client_task_id":"blackbox-1","prompt":"test"}'
 call GET '/api/image-tasks?ids=blackbox-1' "$API"
 call POST /api/settings/retention-cleanup/run "$ADMIN" '{}'
-call POST /v1/search "$API" '{"prompt":"test"}'
 
 echo "PORTS"
 for port in 3000 3001 3002 3010; do

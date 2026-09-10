@@ -1,8 +1,19 @@
 <template>
-  <Teleport to="body">
-    <div v-if="file" class="lightbox" @click.self="$emit('close')">
-      <div class="lightbox-content">
-        <ModalCloseButton class="lightbox-close" label="关闭预览" tone="dark" @click="$emit('close')" />
+  <ModalShell
+    :open="Boolean(file)"
+    aria-label="图片预览"
+    close-on-overlay
+    close-on-escape
+    overlay-class="lightbox"
+    root-class="lightbox-content"
+    size-class=""
+    max-width="92vw"
+    :z-index="420"
+    bare
+    @close="emit('close')"
+  >
+    <template v-if="file">
+      <CloseButton class="lightbox-close" label="关闭预览" tone="dark" @click="emit('close')" />
         <img
           :src="imageUrl"
           :alt="file.filename"
@@ -25,16 +36,15 @@
             标签
           </button>
         </div>
-      </div>
-    </div>
-  </Teleport>
+    </template>
+  </ModalShell>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Icon } from '@iconify/vue'
+import { CloseButton, ModalShell } from 'nanocat-ui'
 import type { GalleryFile } from '@/api/gallery'
-import ModalCloseButton from './ModalCloseButton.vue'
 
 const props = withDefaults(defineProps<{
   file: GalleryFile | null
@@ -70,10 +80,9 @@ function emitFile(event: 'download' | 'copy' | 'edit-tags') {
 </script>
 
 <style scoped>
-.lightbox {
+:global(.lightbox) {
   position: fixed;
   inset: 0;
-  z-index: 420;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -82,13 +91,18 @@ function emitFile(event: 'download' | 'copy' | 'edit-tags') {
   backdrop-filter: blur(10px);
 }
 
-.lightbox-content {
+:global(.lightbox-content) {
   position: relative;
   display: flex;
-  max-width: 92vw;
   max-height: 92vh;
+  width: fit-content;
   flex-direction: column;
   align-items: center;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .lightbox-close {
@@ -98,10 +112,22 @@ function emitFile(event: 'download' | 'copy' | 'edit-tags') {
 }
 
 .lightbox-media {
+  width: min(88vw, 80rem);
   max-width: 100%;
   max-height: 80vh;
   border-radius: var(--gallery-radius, 16px);
   object-fit: contain;
+}
+
+@media (max-width: 720px) {
+  :global(.lightbox) {
+    padding: 16px;
+  }
+
+  .lightbox-media {
+    width: calc(100vw - 32px);
+    max-height: 76vh;
+  }
 }
 
 .lightbox-info {

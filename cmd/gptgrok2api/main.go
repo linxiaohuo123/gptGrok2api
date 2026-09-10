@@ -1,3 +1,8 @@
+// [INPUT]: internal/config 的配置装载，internal/httpapi 的 Server 装配
+// [OUTPUT]: 进程入口：main
+// [POS]: 进程入口。装载配置 → 组装 Server → 起监听 → 等待信号优雅退出。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package main
 
 import (
@@ -29,9 +34,10 @@ func main() {
 		log.Printf("open runtime log: %v", logErr)
 	}
 
+	api := httpapi.New(cfg)
 	server := &http.Server{
 		Addr:                         cfg.ListenAddr,
-		Handler:                      httpapi.New(cfg).Handler(),
+		Handler:                      api.Handler(),
 		ReadHeaderTimeout:            10 * time.Second,
 		ReadTimeout:                  cfg.RequestTimeout,
 		WriteTimeout:                 0,
@@ -42,7 +48,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("gptgrok2api-go listening on %s", cfg.ListenAddr)
+		log.Printf("GPT2API listening on %s", cfg.ListenAddr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("serve: %v", err)
 		}
@@ -57,4 +63,5 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+	api.Shutdown()
 }

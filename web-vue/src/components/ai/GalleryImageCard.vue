@@ -21,6 +21,7 @@
       <div class="media-topline">
         <Checkbox
           :model-value="selected"
+          :aria-label="`选择图片 ${file.filename}`"
           @click.stop
           @update:model-value="handleSelect"
         />
@@ -38,6 +39,19 @@
         <button class="overlay-btn" title="下载" @click.stop="handleDownload">
           <Icon icon="lucide:download" />
         </button>
+        <button
+          v-if="genboxPushEnabled"
+          class="overlay-btn"
+          :class="{ 'is-busy': genboxBusy }"
+          :disabled="genboxBusy"
+          :title="genboxBusy ? '正在推送 GenBox' : '推送到 GenBox'"
+          @click.stop="handleGenBoxPush"
+        >
+          <Icon
+            :icon="genboxBusy ? 'lucide:loader-circle' : 'lucide:cloud-upload'"
+            :class="{ 'animate-spin': genboxBusy }"
+          />
+        </button>
         <button class="overlay-btn danger" title="删除" @click.stop="handleDelete">
           <Icon icon="lucide:trash-2" />
         </button>
@@ -49,20 +63,16 @@
       <div class="file-meta">
         <span>{{ sizeLabel }}</span>
         <span v-if="dimensions">{{ dimensions }}</span>
+        <span v-if="genboxStatusLabel" class="genbox-badge" :title="genboxStatusLabel">
+          <Icon icon="lucide:cloud-check" />
+          {{ genboxStatusLabel }}
+        </span>
         <Tooltip
           v-if="file.expires_in_seconds !== null && !file.expired && timeRemaining"
           :text="'将在 ' + timeRemaining + ' 后自动删除'"
         >
           <span class="file-countdown">{{ timeRemaining }}</span>
         </Tooltip>
-      </div>
-      <div class="file-meta" v-if="file.source_type">
-        <span>{{ file.source_type === 'generated_output' ? '生成结果' : '历史结果' }}</span>
-        <span v-if="file.model">{{ file.model }}</span>
-      </div>
-      <div class="file-meta" v-if="file.call_id">
-        <span :title="file.call_id">请求 {{ file.call_id.slice(0, 12) }}</span>
-        <span v-if="file.endpoint">{{ file.endpoint }}</span>
       </div>
       <div v-if="file.tags.length" class="tag-row">
         <button
@@ -95,6 +105,9 @@ const props = defineProps<{
   sizeLabel: string
   dimensions: string
   timeRemaining: string
+  genboxPushEnabled: boolean
+  genboxBusy: boolean
+  genboxStatusLabel: string
 }>()
 
 const emit = defineEmits<{
@@ -104,6 +117,7 @@ const emit = defineEmits<{
   (e: 'copy', file: GalleryFile): void
   (e: 'edit-tags', file: GalleryFile): void
   (e: 'download', file: GalleryFile): void
+  (e: 'genbox-push', file: GalleryFile): void
   (e: 'delete', file: GalleryFile): void
   (e: 'tag-click', tag: string): void
 }>()
@@ -130,6 +144,10 @@ function handleEditTags() {
 
 function handleDownload() {
   emit('download', props.file)
+}
+
+function handleGenBoxPush() {
+  emit('genbox-push', props.file)
 }
 
 function handleDelete() {
@@ -287,6 +305,17 @@ function handleTagClick(tag: string) {
   color: white;
 }
 
+.overlay-btn:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.overlay-btn:disabled:hover {
+  transform: none;
+  background: var(--gallery-float-bg);
+  color: var(--gallery-float-fg);
+}
+
 .overlay-btn svg {
   width: 15px;
   height: 15px;
@@ -319,6 +348,20 @@ function handleTagClick(tag: string) {
   min-height: 16px;
   font-size: 11px;
   color: hsl(var(--muted-foreground));
+}
+
+.genbox-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: hsl(142 71% 35%);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.genbox-badge svg {
+  width: 12px;
+  height: 12px;
 }
 
 .file-countdown {

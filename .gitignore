@@ -68,3 +68,7 @@ scripts/test_*.py
 scripts/probe_*.py
 scripts/pix_browser_capture.py
 /web/
+
+# 编译产物：本机 go build 的默认输出，不应进版本库
+/gptgrok2api
+/go-image-gateway/go-image-gateway

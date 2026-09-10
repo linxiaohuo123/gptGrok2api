@@ -1,3 +1,14 @@
+// [INPUT]: 仅标准库（net、net/http、golang.org/x/…)
+// [OUTPUT]: 出网传输：DialContext、Transport、Manager、Lease、ConfigureImageGroups
+// [POS]: HTTP/SOCKS4/SOCKS5 出网与图片节点租约。**代理组可能为 0 节点**，任何按节点数计算的容量都要先判空。
+//         核心不变量：normalizeURL 的 ("", nil) 唯一表示**显式直连**，解析失败一律返回
+//         error。非法串若与直连共用零值，会命中 Transport.cache[""]（http.DefaultTransport），
+//         让账号带着服务器真实 IP 出网；账号级代理非法时必须返回 Lease{Source:"unavailable"}，
+//         严禁穿透到全局池——那会让 A 账号的请求从 B 账号的出口出去。
+//         健康状态按 URL 归一到 Manager.imageHealth，不得寄生在 imageNode 上：
+//         配置重载会重建节点对象，而在途 lease 握的是旧指针。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package proxy
 
 import (
@@ -37,13 +48,16 @@ func URLSelectionFromContext(ctx context.Context) (string, bool) {
 }
 
 func DialContext(ctx context.Context, target, proxyURL string) (net.Conn, error) {
-	proxyURL = normalizeURL(proxyURL)
-	if proxyURL == "" {
+	normalized, err := normalizeURL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if normalized == "" {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", target)
 	}
-	parsed, err := url.Parse(proxyURL)
-	if err != nil || parsed.Host == "" {
-		return nil, fmt.Errorf("invalid proxy URL %q", proxyURL)
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return nil, err
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "socks4", "socks4a":
@@ -110,6 +124,24 @@ type Manager struct {
 	imageSelections uint64
 	imageWake       chan struct{}
 	onImageResult   func(ImageNodeRuntimeResult)
+	// imageHealth 是跨配置重载保留的健康状态，键为归一化后的代理 URL。
+	// 它才是权威来源：配置里的 runtime_failure_count 只是首次见到该 URL 时的种子。
+	imageHealth map[string]*imageNodeHealth
+}
+
+// healthLocked 取出（必要时创建）某个 URL 的健康状态；调用方必须持 m.mu。
+// seed 仅在首次见到该 URL 时生效——之后运行期状态说了算，重载不得把它打回快照。
+func (m *Manager) healthLocked(url string, seed imageNodeHealth) *imageNodeHealth {
+	if m.imageHealth == nil {
+		m.imageHealth = map[string]*imageNodeHealth{}
+	}
+	health, ok := m.imageHealth[url]
+	if !ok {
+		health = &imageNodeHealth{}
+		*health = seed
+		m.imageHealth[url] = health
+	}
+	return health
 }
 
 type GroupConfig struct {
@@ -134,12 +166,25 @@ type imageGroup struct {
 	nodes              []*imageNode
 }
 
+// imageNodeHealth 是按 URL 归一的健康状态，**独立于 imageNode 对象的身份**。
+//
+// 必须独立存在：ConfigureImageGroups 每次重载都会重建 imageNode，而在途 Lease
+// 握的是旧指针。健康计数若寄生在节点对象上，那次成功就写进了没人引用的对象——
+// successes 只累计到 1、2 时既不触发持久化事件、又会在下一次重载被打回配置快照，
+// 于是节点永远攒不够 imageNodeStableSuccess，pickStableNodeLocked 永远选不中它。
+// 驱逐同理：按指针从组里移除，重载后一个都匹配不上，静默失效。
+type imageNodeHealth struct {
+	failures      int
+	successes     int
+	latencyMS     int64
+	cooldownUntil time.Time
+	evicted       bool
+}
+
 type imageNode struct {
-	id, name, url                        string
-	limit, inFlight, failures, successes int
-	latencyMS                            int64
-	cooldownUntil                        time.Time
-	evicted                              bool
+	id, name, url   string
+	limit, inFlight int
+	health          *imageNodeHealth
 }
 
 type Lease struct {
@@ -216,28 +261,43 @@ func (m *Manager) SetImageNodeResultCallback(callback func(ImageNodeRuntimeResul
 	m.mu.Unlock()
 }
 
-func NewManager(single string, pool []string) *Manager {
+// normalizePool 过滤掉代理池里无法解析的条目。
+//
+// 单个坏条目不该让整个池不可用，所以这里丢弃而非报错；但丢弃是刻意的策略，
+// 不是 normalizeURL 失败时的默认结果——两者在类型上已经分开。
+func normalizePool(pool []string) []string {
 	clean := make([]string, 0, len(pool))
 	for _, item := range pool {
-		if value := normalizeURL(item); value != "" {
-			clean = append(clean, value)
+		value, err := normalizeURL(item)
+		if err != nil || value == "" {
+			continue
 		}
+		clean = append(clean, value)
 	}
-	return &Manager{url: normalizeURL(single), pool: clean, imageGroups: map[string]*imageGroup{}, imageWake: make(chan struct{})}
+	return clean
+}
+
+// defaultProxyURL 归一化全局默认代理；非法值退化为未配置（直连）。
+// 全局默认是显式配置，写错时不影响账号身份，但仍然只记为空而不报错。
+func defaultProxyURL(single string) string {
+	value, err := normalizeURL(single)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+func NewManager(single string, pool []string) *Manager {
+	return &Manager{url: defaultProxyURL(single), pool: normalizePool(pool), imageGroups: map[string]*imageGroup{}, imageWake: make(chan struct{})}
 }
 
 func (m *Manager) SetDefault(single string, pool []string) {
 	if m == nil {
 		return
 	}
-	clean := make([]string, 0, len(pool))
-	for _, item := range pool {
-		if value := normalizeURL(item); value != "" {
-			clean = append(clean, value)
-		}
-	}
+	clean := normalizePool(pool)
 	m.mu.Lock()
-	m.url = normalizeURL(single)
+	m.url = defaultProxyURL(single)
 	m.pool = clean
 	m.cursor = 0
 	m.mu.Unlock()
@@ -251,6 +311,8 @@ func (m *Manager) ConfigureImageGroups(fallback string, groups []GroupConfig) {
 		return
 	}
 	next := map[string]*imageGroup{}
+	seeds := map[*imageNode]imageNodeHealth{}
+	live := map[string]bool{}
 	for _, group := range groups {
 		id := strings.TrimSpace(group.ID)
 		if id == "" || !group.Enabled {
@@ -258,30 +320,23 @@ func (m *Manager) ConfigureImageGroups(fallback string, groups []GroupConfig) {
 		}
 		item := &imageGroup{id: id, name: strings.TrimSpace(group.Name), strategy: strings.TrimSpace(group.Strategy)}
 		for _, node := range group.Nodes {
-			proxyURL := normalizeURL(node.URL)
-			if !node.Enabled || proxyURL == "" || !imageProxyCompatible(proxyURL) || !probeAllowsRuntimeValidation(node.LastStatus, node.LastError) {
+			proxyURL, normalizeErr := normalizeURL(node.URL)
+			if normalizeErr != nil || !node.Enabled || proxyURL == "" || !imageProxyCompatible(proxyURL) || !probeAllowsRuntimeValidation(node.LastStatus, node.LastError) {
 				continue
 			}
 			limit := node.ImageConcurrencyLimit
 			if limit < 1 {
 				limit = defaultImageNodeLimit
 			}
-			failures := node.RuntimeFailures
-			if failures < 0 {
-				failures = 0
+			created := &imageNode{id: strings.TrimSpace(node.ID), name: strings.TrimSpace(node.Name), url: proxyURL, limit: limit}
+			// 配置值只作种子，权威来源是跨重载保留的健康表。
+			seeds[created] = imageNodeHealth{
+				failures:  max(node.RuntimeFailures, 0),
+				successes: max(node.RuntimeSuccesses, 0),
+				latencyMS: max(node.RuntimeLatencyMS, 0),
 			}
-			if failures >= imageNodeFailureLimit {
-				continue
-			}
-			successes := node.RuntimeSuccesses
-			if successes < 0 {
-				successes = 0
-			}
-			latencyMS := node.RuntimeLatencyMS
-			if latencyMS < 0 {
-				latencyMS = 0
-			}
-			item.nodes = append(item.nodes, &imageNode{id: strings.TrimSpace(node.ID), name: strings.TrimSpace(node.Name), url: proxyURL, limit: limit, failures: failures, successes: successes, latencyMS: latencyMS})
+			live[proxyURL] = true
+			item.nodes = append(item.nodes, created)
 		}
 		next[id] = item
 	}
@@ -289,7 +344,29 @@ func (m *Manager) ConfigureImageGroups(fallback string, groups []GroupConfig) {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(fallback)), "group:") {
 		groupID = strings.TrimSpace(strings.TrimSpace(fallback)[len("group:"):])
 	}
+
 	m.mu.Lock()
+	for node, seed := range seeds {
+		node.health = m.healthLocked(node.url, seed)
+	}
+	// 配置里已消失的 URL 不再保留状态，避免这张表随订阅轮换无限增长。
+	for url := range m.imageHealth {
+		if !live[url] {
+			delete(m.imageHealth, url)
+		}
+	}
+	// 过滤必须在绑定健康状态之后做：配置里的 runtime_failure_count 可能过期，
+	// 权威来源是健康表——否则刚判定驱逐的节点会在下一次重载原样复活。
+	for _, group := range next {
+		nodes := make([]*imageNode, 0, len(group.nodes))
+		for _, node := range group.nodes {
+			if node.health.evicted || node.health.failures >= imageNodeFailureLimit {
+				continue
+			}
+			nodes = append(nodes, node)
+		}
+		group.nodes = nodes
+	}
 	m.imageGroups = next
 	m.imageGroupID = groupID
 	m.imageCursor = 0
@@ -323,7 +400,14 @@ func (m *Manager) AcquireImage(fields map[string]any) *Lease {
 				}
 				break
 			}
-			if normalized := normalizeURL(value); normalized != "" && imageProxyCompatible(normalized) {
+			normalized, normalizeErr := normalizeURL(value)
+			if normalizeErr != nil {
+				// 账号声明了代理却写错了——绝不能穿透到全局池（A 账号的请求会从
+				// B 账号的出口出去）或退化成直连（暴露服务器真实 IP）。
+				// "unavailable" 是既有哨兵，调用方据此让本次请求显式失败。
+				return &Lease{Source: "unavailable"}
+			}
+			if normalized != "" && imageProxyCompatible(normalized) {
 				return &Lease{URL: normalized, Source: "account"}
 			}
 		}
@@ -364,7 +448,13 @@ func (m *Manager) AcquireImageContext(ctx context.Context, fields map[string]any
 				groupID = strings.TrimSpace(value[len("group:"):])
 				break
 			}
-			if normalized := normalizeURL(value); normalized != "" && imageProxyCompatible(normalized) {
+			normalized, normalizeErr := normalizeURL(value)
+			if normalizeErr != nil {
+				// 同 AcquireImageContext：账号级代理非法必须显式失败，
+				// 不允许穿透到全局池或退化成直连。
+				return &Lease{Source: "unavailable"}, nil
+			}
+			if normalized != "" && imageProxyCompatible(normalized) {
 				return &Lease{URL: normalized, Source: "account"}, nil
 			}
 			break
@@ -435,14 +525,14 @@ func (m *Manager) acquireGroupLocked(groupID string) (*Lease, bool, time.Time) {
 	var retryAt time.Time
 	stableExists := false
 	for _, node := range group.nodes {
-		if node.evicted {
+		if node.health.evicted {
 			continue
 		}
-		if node.successes >= imageNodeStableSuccess && node.failures == 0 {
+		if node.health.successes >= imageNodeStableSuccess && node.health.failures == 0 {
 			stableExists = true
 		}
-		if now.Before(node.cooldownUntil) && (retryAt.IsZero() || node.cooldownUntil.Before(retryAt)) {
-			retryAt = node.cooldownUntil
+		if now.Before(node.health.cooldownUntil) && (retryAt.IsZero() || node.health.cooldownUntil.Before(retryAt)) {
+			retryAt = node.health.cooldownUntil
 		}
 	}
 	canary := stableExists && (m.imageSelections+1)%imageNodeCanaryEvery == 0
@@ -474,8 +564,8 @@ func (m *Manager) pickStableNodeLocked(group *imageGroup, now time.Time, exclude
 	for offset := 0; offset < len(group.nodes); offset++ {
 		index := (m.imageCursor + offset) % len(group.nodes)
 		node := group.nodes[index]
-		if node.evicted || node.url == excludedURL || node.successes < imageNodeStableSuccess || node.failures > 0 ||
-			node.inFlight >= node.limit || now.Before(node.cooldownUntil) {
+		if node.health.evicted || node.url == excludedURL || node.health.successes < imageNodeStableSuccess || node.health.failures > 0 ||
+			node.inFlight >= node.limit || now.Before(node.health.cooldownUntil) {
 			continue
 		}
 		if best < 0 || imageNodeBetter(node, group.nodes[best]) {
@@ -489,8 +579,8 @@ func (m *Manager) pickProbeNodeLocked(group *imageGroup, now time.Time, excluded
 	for offset := 0; offset < len(group.nodes); offset++ {
 		index := (m.imageCursor + offset) % len(group.nodes)
 		node := group.nodes[index]
-		if node.evicted || node.url == excludedURL || (node.successes >= imageNodeStableSuccess && node.failures == 0) ||
-			node.inFlight >= node.limit || now.Before(node.cooldownUntil) {
+		if node.health.evicted || node.url == excludedURL || (node.health.successes >= imageNodeStableSuccess && node.health.failures == 0) ||
+			node.inFlight >= node.limit || now.Before(node.health.cooldownUntil) {
 			continue
 		}
 		return index
@@ -508,10 +598,10 @@ func imageNodeBetter(candidate, current *imageNode) bool {
 }
 
 func effectiveImageNodeLatency(node *imageNode) int64 {
-	if node == nil || node.latencyMS <= 0 {
+	if node == nil || node.health.latencyMS <= 0 {
 		return int64((60 * time.Second) / time.Millisecond)
 	}
-	return node.latencyMS
+	return node.health.latencyMS
 }
 
 func newImageLease(manager *Manager, group *imageGroup, node *imageNode) *Lease {
@@ -549,7 +639,11 @@ func (m *Manager) resolveImageFallback() (string, bool) {
 // The authenticated ChatGPT image flow uses tls-client for browser TLS
 // fingerprinting. That client supports HTTP(S) and SOCKS5, but not SOCKS4.
 func imageProxyCompatible(proxyURL string) bool {
-	parsed, err := url.Parse(normalizeURL(proxyURL))
+	normalized, err := normalizeURL(proxyURL)
+	if err != nil {
+		return false
+	}
+	parsed, err := url.Parse(normalized)
 	if err != nil || parsed.Host == "" {
 		return false
 	}
@@ -593,7 +687,8 @@ func (m *Manager) AcquireStableImage(fields map[string]any, excludedURL string) 
 		return nil
 	}
 	now := time.Now()
-	excludedURL = normalizeURL(excludedURL)
+	// 排除项只是"本轮别再选它"的提示，无法解析等价于没有排除项，按空处理。
+	excludedURL, _ = normalizeURL(excludedURL)
 	index := m.pickStableNodeLocked(group, now, excludedURL)
 	if index < 0 {
 		return nil
@@ -629,14 +724,16 @@ func (l *Lease) Release(runtimeFailure bool) {
 		}
 		runtimeFailure = runtimeFailure || l.failed.Load()
 		observedLatencyMS := l.latencyMS.Load()
-		if runtimeFailure && !l.node.evicted {
-			l.node.failures++
-			cooldown := time.Duration(1<<min(l.node.failures-1, 4)) * time.Minute
-			l.node.cooldownUntil = time.Now().Add(cooldown)
-			removed := l.node.failures >= imageNodeFailureLimit
+		if runtimeFailure && !l.node.health.evicted {
+			l.node.health.failures++
+			cooldown := time.Duration(1<<min(l.node.health.failures-1, 4)) * time.Minute
+			l.node.health.cooldownUntil = time.Now().Add(cooldown)
+			removed := l.node.health.failures >= imageNodeFailureLimit
 			if removed {
-				l.node.evicted = true
-				if group := l.manager.imageGroups[l.GroupID]; group != nil {
+				l.node.health.evicted = true
+				// 配置重载可能把组过滤成 0 节点，此时 len(group.nodes)-1 为 -1，
+				// make 的负容量会 panic；空组没有可驱逐的节点，跳过。
+				if group := l.manager.imageGroups[l.GroupID]; group != nil && len(group.nodes) > 0 {
 					nodes := make([]*imageNode, 0, len(group.nodes)-1)
 					for _, node := range group.nodes {
 						if node != l.node {
@@ -651,25 +748,25 @@ func (l *Lease) Release(runtimeFailure bool) {
 					}
 				}
 			}
-			event = &ImageNodeRuntimeResult{GroupID: l.GroupID, GroupName: l.GroupName, NodeID: l.NodeID, NodeName: l.NodeName, URL: l.URL, Failures: l.node.failures, Successes: l.node.successes, LatencyMS: l.node.latencyMS, Removed: removed}
-		} else if !runtimeFailure && !l.node.evicted {
-			hadFailures := l.node.failures > 0
-			l.node.failures = 0
-			l.node.successes++
+			event = &ImageNodeRuntimeResult{GroupID: l.GroupID, GroupName: l.GroupName, NodeID: l.NodeID, NodeName: l.NodeName, URL: l.URL, Failures: l.node.health.failures, Successes: l.node.health.successes, LatencyMS: l.node.health.latencyMS, Removed: removed}
+		} else if !runtimeFailure && !l.node.health.evicted {
+			hadFailures := l.node.health.failures > 0
+			l.node.health.failures = 0
+			l.node.health.successes++
 			if observedLatencyMS > 0 {
-				if l.node.latencyMS <= 0 {
-					l.node.latencyMS = observedLatencyMS
+				if l.node.health.latencyMS <= 0 {
+					l.node.health.latencyMS = observedLatencyMS
 				} else {
-					l.node.latencyMS = (l.node.latencyMS*7 + observedLatencyMS*3) / 10
+					l.node.health.latencyMS = (l.node.health.latencyMS*7 + observedLatencyMS*3) / 10
 				}
 			}
 			if l.slow.Load() {
-				l.node.cooldownUntil = time.Now().Add(imageNodeSlowCooldown)
+				l.node.health.cooldownUntil = time.Now().Add(imageNodeSlowCooldown)
 			} else {
-				l.node.cooldownUntil = time.Time{}
+				l.node.health.cooldownUntil = time.Time{}
 			}
-			if hadFailures || l.slow.Load() || l.node.successes == imageNodeStableSuccess || l.node.successes%25 == 0 {
-				event = &ImageNodeRuntimeResult{GroupID: l.GroupID, GroupName: l.GroupName, NodeID: l.NodeID, NodeName: l.NodeName, URL: l.URL, Successes: l.node.successes, LatencyMS: l.node.latencyMS}
+			if hadFailures || l.slow.Load() || l.node.health.successes == imageNodeStableSuccess || l.node.health.successes%25 == 0 {
+				event = &ImageNodeRuntimeResult{GroupID: l.GroupID, GroupName: l.GroupName, NodeID: l.NodeID, NodeName: l.NodeName, URL: l.URL, Successes: l.node.health.successes, LatencyMS: l.node.health.latencyMS}
 			}
 		}
 		callback := l.manager.onImageResult
@@ -692,7 +789,8 @@ func (m *Manager) DescribeImageEgress(proxyURL string) EgressInfo {
 	if m == nil {
 		return EgressInfo{Source: "direct"}
 	}
-	normalized := normalizeURL(proxyURL)
+	// 纯描述用途：非法串不参与匹配，落到下面的直连分支即可。
+	normalized, _ := normalizeURL(proxyURL)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, group := range m.imageGroups {
@@ -712,14 +810,9 @@ func (m *Manager) SetResource(single string, pool []string) {
 	if m == nil {
 		return
 	}
-	clean := make([]string, 0, len(pool))
-	for _, item := range pool {
-		if value := normalizeURL(item); value != "" {
-			clean = append(clean, value)
-		}
-	}
+	clean := normalizePool(pool)
 	m.mu.Lock()
-	m.resourceURL = normalizeURL(single)
+	m.resourceURL = defaultProxyURL(single)
 	m.resourcePool = clean
 	m.resourceCursor = 0
 	m.mu.Unlock()
@@ -739,9 +832,15 @@ func (m *Manager) Resolve(fields map[string]any, resource bool) string {
 	if fields != nil {
 		for _, key := range []string{"proxy", "proxy_url", "proxyUrl"} {
 			if value := stringValue(fields[key]); value != "" && !strings.HasPrefix(strings.ToLower(value), "group:") {
-				if normalized := normalizeURL(value); normalized != "" {
-					return normalized
+				normalized, err := normalizeURL(value)
+				if err != nil {
+					// 账号声明了代理却写错了：原样返回，由 forProxy 以
+					// "invalid proxy URL" 拒掉本次请求。在这里返回 ""
+					// （= 直连）或继续往下穿透到全局池，都会把故障藏起来。
+					return value
 				}
+				// 显式 "direct" 归一化为空串即直连，同样不得穿透到全局池。
+				return normalized
 			}
 		}
 	}
@@ -827,16 +926,23 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (t *Transport) forProxy(proxyURL string) (http.RoundTripper, error) {
-	proxyURL = normalizeURL(proxyURL)
+	// 非法串必须在这里以错误的形式被拒。若沿用"解析失败就返回空串"的旧语义，
+	// 它会命中 cache[""] ——也就是直连传输，于是账号带着服务器真实 IP 出网。
+	normalized, err := normalizeURL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	proxyURL = normalized
 	t.mu.Lock()
 	if roundTripper, ok := t.cache[proxyURL]; ok {
 		t.mu.Unlock()
 		return roundTripper, nil
 	}
 	t.mu.Unlock()
+	// proxyURL 为空即显式直连，由 NewTransport 预置的 cache[""] 命中上面的分支。
 	parsed, err := url.Parse(proxyURL)
-	if err != nil || parsed.Host == "" {
-		return nil, fmt.Errorf("invalid proxy URL %q", proxyURL)
+	if err != nil {
+		return nil, err
 	}
 	var roundTripper http.RoundTripper
 	switch strings.ToLower(parsed.Scheme) {
@@ -868,10 +974,29 @@ func (t *Transport) forProxy(proxyURL string) (http.RoundTripper, error) {
 }
 
 func cloneHTTPTransport(base http.RoundTripper) *http.Transport {
+	var t *http.Transport
 	if transport, ok := base.(*http.Transport); ok {
-		return transport.Clone()
+		t = transport.Clone()
+	} else {
+		t = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	return http.DefaultTransport.(*http.Transport).Clone()
+	tuneTransport(t)
+	return t
+}
+
+func tuneTransport(t *http.Transport) {
+	if t == nil {
+		return
+	}
+	if t.MaxIdleConns < 1000 {
+		t.MaxIdleConns = 1000
+	}
+	if t.MaxIdleConnsPerHost < 100 {
+		t.MaxIdleConnsPerHost = 100
+	}
+	if t.IdleConnTimeout == 0 {
+		t.IdleConnTimeout = 90 * time.Second
+	}
 }
 
 type socks5Dialer struct{ proxy *url.URL }
@@ -1059,19 +1184,27 @@ func socks5Connect(conn io.ReadWriter, address string) error {
 	return err
 }
 
-func normalizeURL(value string) string {
+// normalizeURL 归一化一个代理串。
+//
+// 返回 ("", nil) 表示显式直连（空串或 "direct"）；返回非空串表示一个可用的代理。
+// 无法解析的输入一律返回 error。
+//
+// "非法"绝不能与"直连"共用同一个返回值：代理池/账号字段里一个手误的串
+// （订阅导出常见的 ip:port:user:pass、密码含裸 % 等）会因此静默退化成直连，
+// 请求从服务器真实 IP 出网，账号与机房 IP 被上游关联，而全程没有任何告警。
+func normalizeURL(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || strings.EqualFold(value, "direct") {
-		return ""
+		return "", nil
 	}
 	if !strings.Contains(value, "://") {
 		value = "http://" + value
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Host == "" {
-		return ""
+		return "", fmt.Errorf("invalid proxy URL %q", value)
 	}
-	return parsed.String()
+	return parsed.String(), nil
 }
 
 func stringValue(value any) string {

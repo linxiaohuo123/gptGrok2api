@@ -1,7 +1,7 @@
 ﻿<template>
   <StatusPill
     :label="laneSummaryText(lanes)"
-    :tone-class="laneSummaryClass(lanes)"
+    :tone="laneSummaryTone(lanes)"
     title="Lane 详情"
     card-class="w-56"
   >
@@ -28,7 +28,7 @@ import type { AccountLane } from '@/api/accounts'
 import {
   laneEnabled,
   laneLineClass,
-  laneSummaryClass,
+  laneSummaryTone,
   laneSummaryText,
 } from '@/views/accounts/viewUtils'
 

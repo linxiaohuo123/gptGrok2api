@@ -1,4 +1,4 @@
-import type { DebugSearchImageGroup, DebugSearchResult, DebugSearchSource } from '@/api/debug'
+import type { OpenAIV1SearchImageGroup, OpenAIV1SearchResult, OpenAIV1SearchSource } from '@/api/openaiV1'
 import type { StudioSearchImageGroup, StudioSearchSource } from '@/components/studio/types'
 
 export type StudioLegacySearchResult = {
@@ -15,7 +15,7 @@ export function normalizeStudioSearchImageGroups(value: unknown): StudioSearchIm
   const groups = value
     .map((item): StudioSearchImageGroup | null => {
       if (!item || typeof item !== 'object') return null
-      const raw = item as DebugSearchImageGroup & { aspectRatio?: unknown; numPerQuery?: unknown; query?: unknown; queries?: unknown }
+      const raw = item as OpenAIV1SearchImageGroup & { aspectRatio?: unknown; numPerQuery?: unknown; query?: unknown; queries?: unknown }
       const rawQueries = Array.isArray(raw.queries)
         ? raw.queries
         : Array.isArray(raw.query)
@@ -58,7 +58,7 @@ export function normalizeStudioSearchSources(value: unknown): StudioSearchSource
   const sources = value
     .map((item): StudioSearchSource | null => {
       if (!item || typeof item !== 'object') return null
-      const raw = item as DebugSearchSource
+      const raw = item as OpenAIV1SearchSource
       const source = {
         title: cleanStudioText(raw.title),
         url: cleanStudioText(raw.url),
@@ -104,7 +104,7 @@ export function linkStudioSearchCitations(content: string, ownerId: string, sour
   }).replace(/\s+([，。！？；：,.!?;:])/g, '$1')
 }
 
-export function formatStudioSearchResult(result: DebugSearchResult, ownerId: string, sourceCount: number) {
+export function formatStudioSearchResult(result: OpenAIV1SearchResult, ownerId: string, sourceCount: number) {
   const answer = cleanStudioSearchAnswer(result.answer) || '搜索完成，但上游没有返回摘要。'
   return linkStudioSearchCitations(answer, ownerId, sourceCount)
 }

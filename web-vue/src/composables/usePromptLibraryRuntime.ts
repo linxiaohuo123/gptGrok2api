@@ -1,5 +1,10 @@
-import { computed, ref, watch } from 'vue'
-import { promptsApi, type PromptLibraryItem, type PromptLibraryResponse, type PromptSource } from '@/api/prompts'
+import { computed, ref, shallowRef, watch } from 'vue'
+import {
+  promptsApi,
+  type PromptLibraryItem,
+  type PromptLibraryView,
+  type PromptSourcePayload,
+} from '@/api/prompts'
 import { firstPromptPreviewUrl, markPromptPreviewBroken } from '@/lib/promptAssets'
 import {
   ALL_PROMPT_CATEGORY,
@@ -9,67 +14,96 @@ import {
   promptSourceLabel,
 } from '@/lib/promptLibrary'
 
-function createPromptLibraryState() {
-  return {
-    loading: ref(false),
-    loadError: ref(''),
-    prompts: ref<PromptLibraryItem[]>([]),
-    sources: ref<PromptSource[]>([]),
-    synced: ref(false),
-  }
-}
+type PromptMutationAction = '' | 'toggle-source' | 'refresh-all'
 
-const promptLibraryState = createPromptLibraryState()
-let promptLibraryRequest: Promise<PromptLibraryResponse> | null = null
+const snapshot = shallowRef<PromptLibraryView | null>(null)
+const loading = ref(false)
+const loadError = ref('')
+const mutationBusy = ref(false)
+const mutationAction = ref<PromptMutationAction>('')
+const mutationSourceId = ref('')
 
-function applyPromptLibrary(result: PromptLibraryResponse) {
-  promptLibraryState.prompts.value = result.items
-  promptLibraryState.sources.value = result.sources
-  promptLibraryState.synced.value = Boolean(result.synced || result.items.length)
-  promptLibraryState.loadError.value = ''
+const prompts = computed(() => snapshot.value?.items ?? [])
+const sources = computed(() => snapshot.value?.sources ?? [])
+const synced = computed(() => snapshot.value?.synced ?? false)
+
+let loadGeneration = 0
+let currentLoad: Promise<boolean> | null = null
+
+function commitSnapshot(result: PromptLibraryView) {
+  snapshot.value = result
+  loadError.value = ''
 }
 
 export async function preloadPromptLibrary(force = false) {
-  const state = promptLibraryState
-  if (state.loading.value && promptLibraryRequest && !force) {
-    try {
-      await promptLibraryRequest
-      return true
-    } catch {
-      return false
-    }
-  }
-  if (!force && state.prompts.value.length > 0) return true
+  if (mutationBusy.value) return false
+  if (!force && snapshot.value !== null) return true
+  if (!force && currentLoad) return currentLoad
 
-  state.loading.value = true
-  state.loadError.value = ''
-  const request = promptsApi.list()
-  promptLibraryRequest = request
+  const generation = ++loadGeneration
+  loading.value = true
+  loadError.value = ''
+  const request = (async () => {
+    try {
+      const result = await promptsApi.list()
+      if (generation !== loadGeneration || mutationBusy.value) return false
+      commitSnapshot(result)
+      return true
+    } catch (error: any) {
+      if (generation === loadGeneration && !mutationBusy.value) {
+        loadError.value = error?.message || '提示词加载失败，请稍后重试。'
+      }
+      return false
+    } finally {
+      if (generation === loadGeneration) loading.value = false
+    }
+  })()
+  currentLoad = request
   try {
-    const result = await request
-    applyPromptLibrary(result)
-    return true
-  } catch (error: any) {
-    state.loadError.value = error?.message || '提示词加载失败，请稍后重试。'
-    return false
+    return await request
   } finally {
-    if (promptLibraryRequest === request) promptLibraryRequest = null
-    state.loading.value = false
+    if (currentLoad === request) currentLoad = null
   }
 }
 
+async function mutatePromptLibrary(
+  action: Exclude<PromptMutationAction, ''>,
+  sourceId: string,
+  request: () => Promise<PromptLibraryView>,
+) {
+  if (mutationBusy.value) throw new Error('提示词源正在更新，请稍后再试。')
+
+  mutationBusy.value = true
+  mutationAction.value = action
+  mutationSourceId.value = sourceId
+  loadGeneration += 1
+  loading.value = false
+  try {
+    const result = await request()
+    commitSnapshot(result)
+    return result
+  } finally {
+    mutationBusy.value = false
+    mutationAction.value = ''
+    mutationSourceId.value = ''
+  }
+}
+
+export function updatePromptSource(id: string, payload: PromptSourcePayload) {
+  return mutatePromptLibrary('toggle-source', id, () => promptsApi.updateSource(id, payload))
+}
+
+export function refreshPromptSources() {
+  return mutatePromptLibrary('refresh-all', '', () => promptsApi.refreshSources())
+}
+
 export function usePromptLibraryRuntime() {
-  const loading = promptLibraryState.loading
-  const loadError = promptLibraryState.loadError
-  const prompts = promptLibraryState.prompts
-  const sources = promptLibraryState.sources
-  const synced = promptLibraryState.synced
   const keyword = ref('')
   const sourceFilter = ref(ALL_PROMPT_SOURCE)
   const categoryFilter = ref(ALL_PROMPT_CATEGORY)
   const brokenPreviewUrls = ref<Set<string>>(new Set())
 
-  const enabledSourceCount = computed(() => sources.value.filter((source) => source.enabled).length)
+  const enabledSourceCount = computed(() => snapshot.value?.enabled_source_count ?? 0)
   const sourceOptions = computed(() => [
     { label: '全部来源', value: ALL_PROMPT_SOURCE },
     ...sources.value
@@ -102,17 +136,17 @@ export function usePromptLibraryRuntime() {
     })
   }
 
-  async function loadPrompts(force = false) {
-    return preloadPromptLibrary(force)
-  }
-
   watch(sourceFilter, () => {
     categoryFilter.value = ALL_PROMPT_CATEGORY
   })
 
   return {
+    snapshot,
     loading,
     loadError,
+    mutationBusy,
+    mutationAction,
+    mutationSourceId,
     prompts,
     sources,
     synced,
@@ -125,6 +159,8 @@ export function usePromptLibraryRuntime() {
     filteredPrompts,
     promptPreviewUrl,
     handlePreviewError,
-    loadPrompts,
+    loadPrompts: preloadPromptLibrary,
+    updatePromptSource,
+    refreshPromptSources,
   }
 }

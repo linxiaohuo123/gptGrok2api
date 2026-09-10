@@ -1,13 +1,24 @@
+// [INPUT]: accounts/proxy
+// [OUTPUT]: 运行时监控：runtimeMonitor、snapshot/detail/enrich、redactProxyError、调用日志落盘
+// [POS]: 监控记录与代理测试的后端。快照必须深拷贝，脱敏必须一次替换到位。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +64,15 @@ type monitorRecord struct {
 
 func newRuntimeMonitor() *runtimeMonitor {
 	return &runtimeMonitor{active: map[string]*monitorRecord{}, limit: 200}
+}
+
+func (m *runtimeMonitor) activeCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.active)
 }
 
 func (m *runtimeMonitor) start(id, endpoint, model, summary string) {
@@ -187,6 +207,20 @@ func (m *runtimeMonitor) finish(id, status, model, summary, errText string) {
 	m.mu.Unlock()
 }
 
+// 快照必须深拷贝：Metrics/Perf/RequestMeta 是 map，Events 是 map 切片，
+// 只复制结构体的话出锁后序列化仍会与 enrich 的写入并发。
+func cloneMonitorRecord(item *monitorRecord) monitorRecord {
+	snapshot := *item
+	snapshot.Metrics = cloneMap(item.Metrics)
+	snapshot.Perf = cloneMap(item.Perf)
+	snapshot.RequestMeta = cloneMap(item.RequestMeta)
+	snapshot.Events = make([]map[string]any, 0, len(item.Events))
+	for _, event := range item.Events {
+		snapshot.Events = append(snapshot.Events, cloneMap(event))
+	}
+	return snapshot
+}
+
 func (m *runtimeMonitor) snapshot() map[string]any {
 	if m == nil {
 		return map[string]any{"active": []monitorRecord{}, "recent": []monitorRecord{}}
@@ -194,11 +228,14 @@ func (m *runtimeMonitor) snapshot() map[string]any {
 	m.mu.Lock()
 	active := make([]monitorRecord, 0, len(m.active))
 	for _, item := range m.active {
-		copy := *item
-		copy.Duration = time.Now().UnixMilli() - copy.StartedAt
-		active = append(active, copy)
+		snapshot := cloneMonitorRecord(item)
+		snapshot.Duration = time.Now().UnixMilli() - snapshot.StartedAt
+		active = append(active, snapshot)
 	}
-	recent := append([]monitorRecord(nil), m.completed...)
+	recent := make([]monitorRecord, 0, len(m.completed))
+	for index := range m.completed {
+		recent = append(recent, cloneMonitorRecord(&m.completed[index]))
+	}
 	m.mu.Unlock()
 	sort.Slice(active, func(i, j int) bool { return active[i].StartedAt < active[j].StartedAt })
 	sort.Slice(recent, func(i, j int) bool { return recent[i].EndedAt > recent[j].EndedAt })
@@ -218,13 +255,13 @@ func (m *runtimeMonitor) detail(id string) (monitorRecord, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if item := m.active[id]; item != nil {
-		copy := *item
-		copy.Duration = time.Now().UnixMilli() - copy.StartedAt
-		return copy, true
+		snapshot := cloneMonitorRecord(item)
+		snapshot.Duration = time.Now().UnixMilli() - snapshot.StartedAt
+		return snapshot, true
 	}
 	for index := len(m.completed) - 1; index >= 0; index-- {
 		if m.completed[index].CallID == id {
-			return m.completed[index], true
+			return cloneMonitorRecord(&m.completed[index]), true
 		}
 	}
 	return monitorRecord{}, false
@@ -302,21 +339,13 @@ func (s *Server) proxyTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"result": result})
 }
 
+// 代理 URL 里的凭据必须抹掉，且必须一次替换到位。
+// 旧实现用 for 循环反复从字符串开头查找 scheme，替换文本里又塞回了 "@"，
+// 第二轮命中的正是刚插入的那个 "@"，替换结果与上一轮逐字节相同 → 永不退出。
+var proxyCredentialPattern = regexp.MustCompile(`(?i)\b(https?|socks4a?|socks5h?)://[^/\s@]*@`)
+
 func redactProxyError(value string) string {
-	for _, scheme := range []string{"http://", "https://", "socks4://", "socks4a://", "socks5://", "socks5h://", "socks://"} {
-		for {
-			start := strings.Index(strings.ToLower(value), scheme)
-			if start < 0 {
-				break
-			}
-			at := strings.Index(value[start:], "@")
-			if at < 0 {
-				break
-			}
-			value = value[:start+len(scheme)] + "[REDACTED]@" + value[start+at+1:]
-		}
-	}
-	return value
+	return proxyCredentialPattern.ReplaceAllString(value, "$1://[REDACTED]@")
 }
 
 func (s *Server) monitorAPI(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +373,10 @@ func (s *Server) monitorAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "request not found", "not_found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"detail": item})
+	// 直接返回记录本身。此前包了一层 {"detail": ...}，而前端把这个响应的类型
+	// 声明为 RealtimeMonitorRecordDetail —— 于是 record.presentation 取到的是
+	// undefined，详情抽屉一点开就抛。
+	writeJSON(w, http.StatusOK, monitorRecordMap(item))
 }
 
 func (s *Server) monitorSnapshotWithHistory() map[string]any {
@@ -372,7 +404,12 @@ func (s *Server) monitorSnapshotWithHistory() map[string]any {
 		recent = recent[:200]
 	}
 
-	slow := append([]map[string]any(nil), recent...)
+	// 必须 make 出非 nil 切片：append([]T(nil), 空...) 返回 nil，会序列化成
+	// JSON null。而前端写的是 monitorData.value?.slow.slice(0, 8) —— `?.`
+	// 只护住了 monitorData.value，没护住 .slow，null.slice 直接抛 TypeError，
+	// 整个监控页的 computed 失败、页面空白。
+	slow := make([]map[string]any, 0, len(recent))
+	slow = append(slow, recent...)
 	sort.SliceStable(slow, func(i, j int) bool {
 		return monitorNumber(slow[i]["duration_ms"]) > monitorNumber(slow[j]["duration_ms"])
 	})
@@ -508,6 +545,30 @@ func (s *Server) monitorSnapshotWithHistory() map[string]any {
 	return snapshot
 }
 
+// monitorEventMaps 补齐前端 RealtimeMonitorEvent 在渲染中用到的可选字段。
+//
+// timing_text / detail_text 都被模板里的 v-if 守着，缺失只会少显示一行而不会抛，
+// 所以这里是锦上添花；call_id 与 model 同理。补上后详情抽屉的时间线才有内容。
+func monitorEventMaps(events []map[string]any, callID, modelName string) []any {
+	out := make([]any, 0, len(events))
+	for _, event := range events {
+		item := cloneMap(event)
+		if _, ok := item["call_id"]; !ok && callID != "" {
+			item["call_id"] = callID
+		}
+		if _, ok := item["model"]; !ok && modelName != "" {
+			item["model"] = modelName
+		}
+		if _, ok := item["timing_text"]; !ok {
+			if ms := intValue(event["duration_ms"]); ms > 0 {
+				item["timing_text"] = formatDurationText(ms)
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 func monitorRecordMaps(value any) []map[string]any {
 	result := []map[string]any{}
 	switch typed := value.(type) {
@@ -525,6 +586,171 @@ func monitorRecordMaps(value any) []map[string]any {
 		}
 	}
 	return result
+}
+
+// monitorMetricLabels 给监控指标一个中文名；未收录的键回退为键名本身。
+var monitorMetricLabels = map[string]string{
+	"duration_ms":           "总时长",
+	"total_ms":              "总时长",
+	"http_ttfb_ms":          "上游首字节",
+	"sse_first_event_ms":    "SSE 首事件",
+	"stream_first_queue_ms": "入口排队",
+	"account_wait_ms":       "等待账号",
+	"egress_wait_ms":        "等待出口",
+	"handler_queue_ms":      "入口队列",
+	"upstream_ms":           "上游耗时",
+	"download_ms":           "下载耗时",
+}
+
+// monitorSlowThresholdMS 超过这个耗时的指标会被列进 slow_metrics。
+const monitorSlowThresholdMS = 5000
+
+// monitorRecordPresentation 生成前端 MonitorRecordPresentation 契约。
+//
+// 前端 MonitorActiveRow / MonitorRecentRow / MonitorSlowCard 与 monitorView 的
+// 签名函数都直接读 row.presentation.*。整个对象缺失时，Vue 的渲染错误处理会把
+// 整棵子树渲染成空——监控页白屏，而控制台只留一句报错。
+//
+// 字段清单以 web-vue/src/api/monitor.ts 的 MonitorRecordPresentation 为准。
+func monitorRecordPresentation(item monitorRecord) map[string]any {
+	durationMS := int(item.Duration)
+	if durationMS <= 0 && item.StartedAt > 0 {
+		end := item.EndedAt
+		if end == 0 {
+			end = time.Now().UnixMilli()
+		}
+		durationMS = int(end - item.StartedAt)
+	}
+
+	// 指标按耗时降序，便于挑出最慢的一项作为慢因。
+	type metricEntry struct {
+		key   string
+		label string
+		value int
+	}
+	entries := make([]metricEntry, 0, len(item.Metrics))
+	tracked := 0
+	for key, raw := range item.Metrics {
+		value := intValue(raw)
+		if value <= 0 || key == "progress" {
+			continue
+		}
+		label, ok := monitorMetricLabels[key]
+		if !ok {
+			label = key
+		}
+		entries = append(entries, metricEntry{key: key, label: label, value: value})
+		if key != "duration_ms" && key != "total_ms" {
+			tracked += value
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].value > entries[j].value })
+
+	digest := make([]string, 0, 3)
+	slowMetrics := make([]any, 0)
+	slowReasonCode, slowReason := "", ""
+	for _, entry := range entries {
+		if len(digest) < 3 {
+			digest = append(digest, fmt.Sprintf("%s %s", entry.label, formatDurationText(entry.value)))
+		}
+		if entry.value < monitorSlowThresholdMS {
+			continue
+		}
+		slowMetrics = append(slowMetrics, map[string]any{
+			"key":        entry.key,
+			"label":      entry.label,
+			"value_ms":   entry.value,
+			"value_text": formatDurationText(entry.value),
+			"important":  entry.value >= monitorSlowThresholdMS*3,
+		})
+		if slowReason == "" {
+			slowReasonCode = entry.key
+			slowReason = fmt.Sprintf("%s耗时 %s，超过 %s 的阈值", entry.label, formatDurationText(entry.value), formatDurationText(monitorSlowThresholdMS))
+		}
+	}
+
+	egressText := firstNonEmpty(item.EgressLabel, item.EgressMode, item.ProxySource)
+	if egressText == "" {
+		if item.HasProxy {
+			egressText = "已配置代理"
+		} else {
+			egressText = "直连"
+		}
+	}
+	accountAttempt := firstNonEmpty(stringValue(item.Metrics["account_attempts"]), "")
+	if accountAttempt != "" {
+		accountAttempt = "尝试 " + accountAttempt + " 次"
+	}
+	accountEgress := strings.TrimSpace(strings.Join(nonEmptyStrings(item.AccountEmail, egressText), " · "))
+
+	untracked := durationMS - tracked
+	if untracked < 0 {
+		untracked = 0
+	}
+	return map[string]any{
+		"status_label":          monitorStatusLabel(item),
+		"status_tone":           monitorStatusTone(item),
+		"stage_text":            monitorStageLabel(item.Stage),
+		"error_text":            item.Error,
+		"duration_text":         formatDurationText(durationMS),
+		"metric_digest":         strings.Join(digest, " · "),
+		"egress_text":           egressText,
+		"account_attempt_text":  accountAttempt,
+		"account_egress_text":   accountEgress,
+		"tracked_duration_ms":   tracked,
+		"untracked_duration_ms": untracked,
+		"slow_metrics":          slowMetrics,
+		"slow_reason_code":      slowReasonCode,
+		"slow_reason":           slowReason,
+	}
+}
+
+func monitorStatusLabel(item monitorRecord) string {
+	switch strings.ToLower(strings.TrimSpace(item.Status)) {
+	case "success", "completed":
+		return "成功"
+	case "failed", "error":
+		return "失败"
+	case "cancelled", "canceled":
+		return "已取消"
+	case "running":
+		return "进行中"
+	case "queued":
+		return "排队中"
+	default:
+		return firstNonEmpty(item.Status, "进行中")
+	}
+}
+
+// monitorStatusTone 只返回前端 MonitorTone 允许的取值。
+func monitorStatusTone(item monitorRecord) string {
+	if item.Error != "" {
+		return "danger"
+	}
+	switch strings.ToLower(strings.TrimSpace(item.Status)) {
+	case "success", "completed":
+		return "success"
+	case "failed", "error":
+		return "danger"
+	case "cancelled", "canceled":
+		return "muted"
+	case "running":
+		return "info"
+	case "queued":
+		return "muted"
+	default:
+		return "info"
+	}
+}
+
+func nonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, strings.TrimSpace(value))
+		}
+	}
+	return out
 }
 
 func monitorRecordMap(item monitorRecord) map[string]any {
@@ -552,7 +778,7 @@ func monitorRecordMap(item monitorRecord) map[string]any {
 	}
 	result["metrics"] = item.Metrics
 	result["perf"] = item.Perf
-	result["events"] = item.Events
+	result["events"] = monitorEventMaps(item.Events, item.CallID, modelName)
 	result["request_meta"] = item.RequestMeta
 	result["account_email"] = item.AccountEmail
 	result["account_id"] = item.AccountID
@@ -562,6 +788,8 @@ func monitorRecordMap(item monitorRecord) map[string]any {
 	result["egress_mode"] = item.EgressMode
 	result["egress_label"] = item.EgressLabel
 	result["has_proxy"] = item.HasProxy
+	// 前端每一个监控组件都直接读 row.presentation.*，必须随每条记录一起给出。
+	result["presentation"] = monitorRecordPresentation(item)
 	return result
 }
 
@@ -772,7 +1000,7 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 		return
 	}
 	if errText := strings.TrimSpace(errorText); errText != "" {
-		errorText = errText
+		errorText = SanitizeDiagnosticText(errText)
 	}
 	startedAt := time.UnixMilli(record.StartedAt).UTC()
 	endedAt := time.UnixMilli(record.EndedAt).UTC()
@@ -806,15 +1034,23 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 		detail["key_id"] = record.KeyID
 	}
 	if shape, ok := requestShape.(map[string]any); ok {
-		detail["request_meta"] = map[string]any{"size": shape["size"], "image_url_parts": shape["image_url_parts"], "data_url_images": shape["data_url_images"]}
+		detail["request_meta"] = map[string]any{
+			"size":            shape["size"],
+			"quality":         shape["quality"],
+			"response_format": shape["response_format"],
+			"n":               shape["n"],
+			"image_url_parts": shape["image_url_parts"],
+			"data_url_images": shape["data_url_images"],
+		}
 	}
 	if record.RequestMeta != nil {
 		detail["request_meta"] = record.RequestMeta
 	}
 	if summary := strings.TrimSpace(record.Summary); summary != "" {
-		detail["request_text"] = summary
-		detail["request_text_full"] = summary
-		if len(summary) > 180 {
+		sanitizedSummary := SanitizeDiagnosticText(summary)
+		detail["request_text"] = sanitizedSummary
+		detail["request_text_full"] = sanitizedSummary
+		if len(sanitizedSummary) > 180 {
 			detail["request_text_truncated"] = true
 		}
 	}
@@ -826,13 +1062,38 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 	if outputs := responseImageOutputs(responseBody); len(outputs) > 0 {
 		detail["output_images"] = outputs
 		detail["image_urls"] = outputs
+		var resultImages []map[string]any
+		var resolutions []string
+		seen := make(map[string]bool)
+		for _, out := range outputs {
+			fn := out["filename"]
+			w, h := s.lookupImageDimensions(fn)
+			imgMeta := map[string]any{}
+			resText := "未知"
+			if w > 0 && h > 0 {
+				imgMeta["width"] = w
+				imgMeta["height"] = h
+				resText = fmt.Sprintf("%d×%d", w, h)
+			}
+			resultImages = append(resultImages, imgMeta)
+			if !seen[resText] {
+				seen[resText] = true
+				resolutions = append(resolutions, resText)
+			}
+		}
+		detail["result_images"] = resultImages
+		detail["result_data_count"] = len(resultImages)
+		detail["actual_resolution"] = strings.Join(resolutions, " / ")
 	}
 	entry := map[string]any{
 		"id":      record.CallID,
 		"time":    endedAt.Format(time.RFC3339),
 		"type":    "call",
-		"summary": firstNonEmpty(strings.TrimSpace(record.Summary), record.Endpoint, record.Model, record.CallID),
+		"summary": firstNonEmpty(SanitizeDiagnosticText(strings.TrimSpace(record.Summary)), record.Endpoint, record.Model, record.CallID),
 		"detail":  detail,
+	}
+	if s.hourlyMetrics != nil {
+		s.hourlyMetrics.RecordCall(entry)
 	}
 	raw, err := json.Marshal(entry)
 	if err != nil {
@@ -850,6 +1111,76 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 	}
 	defer file.Close()
 	_, _ = file.Write(append(raw, '\n'))
+}
+
+func (s *Server) lookupImageDimensions(idOrFilename string) (int, int) {
+	if s == nil || s.cfg.ImageDataDir == "" || idOrFilename == "" {
+		return 0, 0
+	}
+	id := strings.TrimSuffix(idOrFilename, filepath.Ext(idOrFilename))
+	var targetFile string
+
+	// 优先以 O(1) 路径直查，避免高并发和海量图片下的全目录 ReadDir 扫盘
+	candidates := []string{idOrFilename}
+	for _, ext := range []string{".png", ".webp", ".jpg", ".jpeg", ".gif"} {
+		candidates = append(candidates, id+ext)
+	}
+	for _, cand := range candidates {
+		fullPath := filepath.Join(s.cfg.ImageDataDir, cand)
+		if info, err := os.Stat(fullPath); err == nil && !info.IsDir() {
+			targetFile = fullPath
+			break
+		}
+	}
+
+	if targetFile != "" {
+		if meta := mediaMetadata(targetFile); meta != nil {
+			w := intValue(meta["width"])
+			h := intValue(meta["height"])
+			if w > 0 && h > 0 {
+				return w, h
+			}
+		}
+	} else {
+		// 备选降级：仅在非标扩展名时兜底遍历
+		entries, err := os.ReadDir(s.cfg.ImageDataDir)
+		if err != nil {
+			return 0, 0
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(name, ".meta.json") {
+				continue
+			}
+			if name == idOrFilename || strings.HasPrefix(name, id+".") {
+				targetFile = filepath.Join(s.cfg.ImageDataDir, name)
+				if meta := mediaMetadata(targetFile); meta != nil {
+					w := intValue(meta["width"])
+					h := intValue(meta["height"])
+					if w > 0 && h > 0 {
+						return w, h
+					}
+				}
+				break
+			}
+		}
+	}
+	if targetFile == "" {
+		return 0, 0
+	}
+	f, err := os.Open(targetFile)
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }
 
 func responseImageOutputs(raw []byte) []map[string]string {
@@ -1027,17 +1358,208 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	accounts, _ := s.store.AccountList()
 	accountStats := dashboardAccountStats(accounts)
 	healthy := boolValue(accountStats["healthy"], false)
+	timeRange := r.URL.Query().Get("time_range")
+	now := time.Now()
+	var logsSummary map[string]any
+	var ranges map[string]any
+	if s.hourlyMetrics != nil {
+		logsSummary = s.hourlyMetrics.Summary(timeRange, now)
+		ranges = s.hourlyMetrics.BuildRangesSchemaV5(now)
+	} else {
+		logsSummary = dashboardLogSummary(s.loadCallLogs(), timeRange, now)
+	}
+
+	runtimeMode := "native"
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		runtimeMode = "docker"
+	}
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "gptgrok2api"
+	}
+
+	startTime := s.startTime
+	if startTime.IsZero() {
+		startTime = now
+	}
+	uptimeSecs := int(time.Since(startTime).Seconds())
+	if uptimeSecs < 0 {
+		uptimeSecs = 0
+	}
+
+	var mStats runtime.MemStats
+	runtime.ReadMemStats(&mStats)
+
+	totalDisk, usedDisk, _ := diskUsage(s.cfg.DataDir)
+	var storagePercent any = nil
+	if totalDisk > 0 {
+		storagePercent = float64(usedDisk) / float64(totalDisk) * 100.0
+	}
+
+	mMedia := mediaStats(s.cfg.ImageDataDir)
+	imageCount := intValue(mMedia["count"])
+	imageBytes := int64(intValue(mMedia["size_bytes"]))
+
+	activeRequests := 0
+	if s.monitor != nil {
+		activeRequests = s.monitor.activeCount()
+	}
+
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":       map[bool]string{true: "ok", false: "degraded"}[healthy],
-		"healthy":      healthy,
-		"runtime":      "go",
-		"version":      s.cfg.Version,
-		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"accounts":     accountStats,
-		"storage":      map[string]any{"backend": "json", "health": "ok", "images": mediaStats(s.cfg.ImageDataDir), "videos": mediaStats(s.cfg.VideoDataDir)},
-		"logs":         dashboardLogSummary(s.loadCallLogs(), r.URL.Query().Get("time_range"), time.Now()),
+		"schema_version": 5,
+		"status":         map[bool]string{true: "ok", false: "degraded"}[healthy],
+		"healthy":        healthy,
+		"version":        s.cfg.Version,
+		"generated_at":   now.UTC().Format(time.RFC3339),
+		"meta": map[string]any{
+			"schema_version":   5,
+			"generated_at":     now.UTC().Format(time.RFC3339),
+			"available_ranges": []string{"24h", "7d", "30d"},
+		},
+		"metrics": map[string]any{
+			"status":           "ready",
+			"ready":            true,
+			"stale":            false,
+			"source":           "memory",
+			"source_revision":  nil,
+			"last_ingested_at": now.UTC().Format(time.RFC3339),
+			"freshness_ms":     0,
+			"checkpoint_at":    now.UTC().Format(time.RFC3339),
+			"failure_reason":   nil,
+			"retention_days":   30,
+		},
+		"runtime": map[string]any{
+			"runtime_mode":             runtimeMode,
+			"instance_name":            hostname,
+			"distribution":             runtime.GOOS,
+			"kernel_version":           runtime.GOOS + "/" + runtime.GOARCH,
+			"architecture":             runtime.GOARCH,
+			"python_version":           "go1.23",
+			"cpu_capacity":             math.Max(1.0, float64(runtime.NumCPU())),
+			"service_started_at":       startTime.UTC().Format(time.RFC3339),
+			"service_uptime_seconds":   uptimeSecs,
+			"process_cpu_percent":      nil,
+			"process_memory_bytes":     int(mStats.Sys),
+			"process_memory_percent":   nil,
+			"memory_scope":             "system",
+			"memory_percent":           nil,
+			"storage_percent":          storagePercent,
+			"network_rx_bytes_per_sec": nil,
+			"network_tx_bytes_per_sec": nil,
+		},
+		"operations": map[string]any{
+			"active_requests": activeRequests,
+		},
+		"accounts": accountStats,
+		"storage": map[string]any{
+			"backend":              "json",
+			"health":               "ok",
+			"images":               mMedia,
+			"application_database": map[string]any{"engine": "json", "status": "ok"},
+			"image_storage": map[string]any{
+				"enabled":          true,
+				"mode":             "local",
+				"status":           "not_checked",
+				"available":        true,
+				"image_count":      imageCount,
+				"image_size_bytes": imageBytes,
+			},
+		},
+		"ranges": ranges,
+		"logs":   logsSummary,
 	})
+}
+
+func (s *Server) logDetailAPI(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	logID := strings.TrimPrefix(r.URL.Path, "/api/logs/")
+	if logID == "" {
+		writeError(w, http.StatusBadRequest, "log id is required", "invalid_request_error")
+		return
+	}
+	items := s.loadCallLogs()
+	var matched map[string]any
+	for i := len(items) - 1; i >= 0; i-- {
+		if stringValue(items[i]["id"]) == logID {
+			matched = items[i]
+			break
+		}
+	}
+	if matched == nil {
+		writeError(w, http.StatusNotFound, "log record not found", "not_found")
+		return
+	}
+
+	detail := mapValue(matched["detail"])
+	requestText := stringValue(detail["request_text"])
+	requestMeta := mapValue(detail["request_meta"])
+	requestShape := mapValue(detail["request_shape"])
+	timings := mapValue(detail["timings_ms"])
+	attempts := detail["attempts"]
+	if attempts == nil {
+		attempts = []any{}
+	}
+	imageURLs := detail["image_urls"]
+	if imageURLs == nil {
+		imageURLs = []any{}
+	}
+
+	result := map[string]any{
+		"id":                     stringValue(matched["id"]),
+		"time":                   stringValue(matched["time"]),
+		"type":                   firstNonEmpty(stringValue(matched["type"]), "call"),
+		"summary":                stringValue(matched["summary"]),
+		"business":               firstNonEmpty(stringValue(detail["business"]), "chat"),
+		"outcome":                firstNonEmpty(stringValue(detail["outcome"]), "success"),
+		"endpoint":               stringValue(detail["endpoint"]),
+		"model":                  stringValue(detail["model"]),
+		"status":                 firstNonEmpty(stringValue(detail["status"]), "success"),
+		"display_status":         firstNonEmpty(stringValue(detail["display_status"]), stringValue(detail["status"]), "success"),
+		"key_id":                 stringValue(detail["key_id"]),
+		"key_name":               stringValue(detail["key_name"]),
+		"role":                   stringValue(detail["role"]),
+		"account_email":          stringValue(detail["account_email"]),
+		"conversation_id":        stringValue(detail["conversation_id"]),
+		"duration_ms":            fmt.Sprint(detail["duration_ms"]),
+		"started_at":             stringValue(detail["started_at"]),
+		"ended_at":               stringValue(detail["ended_at"]),
+		"status_code":            intValue(detail["status_code"]),
+		"error_code":             stringValue(detail["error_code"]),
+		"public_error":           stringValue(detail["public_error"]),
+		"request_text":           requestText,
+		"request_text_full":      firstNonEmpty(stringValue(detail["request_text_full"]), requestText),
+		"request_text_truncated": boolValue(detail["request_text_truncated"], false),
+		"request_shape":          requestShape,
+		"request_meta":           requestMeta,
+		"upstream_error":         stringValue(detail["upstream_error"]),
+		"upstream_text":          stringValue(detail["upstream_text"]),
+		"image_urls":             imageURLs,
+		"attempts":               attempts,
+		"timings_ms":             timings,
+		"perf":                   mapValue(detail["perf"]),
+		"metrics":                mapValue(detail["metrics"]),
+		"monitor":                mapValue(detail["monitor"]),
+		"detail_presentation":    mapValue(detail["detail_presentation"]),
+		"raw_detail":             detail,
+	}
+	summaryView := formatCallSummary(matched)
+	if presentation, ok := summaryView["presentation"].(map[string]any); ok {
+		result["presentation"] = presentation
+	}
+	if resultImages := detail["result_images"]; resultImages != nil {
+		result["result_images"] = resultImages
+	}
+	if actualRes := detail["actual_resolution"]; actualRes != nil {
+		result["actual_resolution"] = actualRes
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func newDashboardProviderStats(provider string) map[string]any {
@@ -1052,16 +1574,12 @@ func newDashboardProviderStats(provider string) map[string]any {
 
 func dashboardAccountStats(items []map[string]any) map[string]any {
 	total := newDashboardProviderStats("all")
-	providers := map[string]map[string]any{
-		"gpt":  newDashboardProviderStats("gpt"),
-		"grok": newDashboardProviderStats("grok"),
-	}
+	providers := map[string]map[string]any{"gpt": newDashboardProviderStats("gpt")}
 	for _, item := range items {
-		provider := "grok"
-		if isOpenAIAccount(accounts.Account{Token: accountToken(item), Fields: item}) {
-			provider = "gpt"
+		if !isOpenAIAccount(accounts.Account{Token: accountToken(item), Fields: item}) {
+			continue
 		}
-		for _, stats := range []map[string]any{total, providers[provider]} {
+		for _, stats := range []map[string]any{total, providers["gpt"]} {
 			stats["total"] = intValue(stats["total"]) + 1
 			stats["cumulative_total"] = intValue(stats["cumulative_total"]) + 1
 			category := accountStatusCategory(item)
@@ -1087,10 +1605,10 @@ func dashboardAccountStats(items []map[string]any) map[string]any {
 			byType[accountType] = intValue(byType[accountType]) + 1
 		}
 	}
-	for _, stats := range []map[string]any{total, providers["gpt"], providers["grok"]} {
+	for _, stats := range []map[string]any{total, providers["gpt"]} {
 		stats["healthy"] = intValue(stats["active"]) > 0 || intValue(stats["unlimited_quota_count"]) > 0 || intValue(stats["unknown_quota_count"]) > 0
 	}
-	total["providers"] = map[string]any{"gpt": providers["gpt"], "grok": providers["grok"]}
+	total["providers"] = map[string]any{"gpt": providers["gpt"]}
 	return total
 }
 

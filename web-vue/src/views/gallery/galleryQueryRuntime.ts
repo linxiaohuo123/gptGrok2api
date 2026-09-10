@@ -29,15 +29,15 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
   const files = ref<GalleryFile[]>([])
   const totalSize = ref(0)
   const isLoading = ref(true)
-  const hasLoadedOnce = ref(false)
   const galleryLoadError = ref('')
   const tagFilter = ref('all')
   const searchQuery = ref('')
   const startDate = ref('')
   const endDate = ref('')
   const pageSize = ref(getNumberPreference(preferenceKeys.galleryPageSize, 24, { allowed: galleryPageSizeOptions }))
-  const counts = ref({ all: 0, image: 0, video: 0, music: 0 })
+  const counts = ref({ all: 0, image: 0 })
   const allTags = ref<string[]>([])
+  const genboxPushEnabled = ref(false)
 
   const tagOptions = computed(() => buildTagOptions(allTags.value))
 
@@ -48,39 +48,36 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
     loading: isLoading,
     error: galleryLoadError,
     errorMessage: '加载图片管理失败',
-    fetch: ({ page, pageSize: size }) => Promise.all([
-      galleryApi.getFiles({
-        page: Number(size) ? page : 1,
-        page_size: Number(size),
-        media_type: 'all',
-        tag: tagFilter.value,
-        search: searchQuery.value,
-        start_date: startDate.value,
-        end_date: endDate.value,
-      }),
-      galleryApi.getTags().catch(() => allTags.value),
-    ]),
-    resolvePage: ([data]) => data.page,
-    resolvePageCount: ([data]) => data.page_count,
-    resolveTotal: ([data]) => data.total,
-    apply: ([data, tags]) => {
-      files.value = data.files
-      totalSize.value = data.total_size
-      counts.value = data.counts
-      allTags.value = tags || []
+    isEmpty: () => files.value.length === 0,
+    fetch: ({ page, pageSize: size }) => galleryApi.getFiles({
+      page,
+      page_size: Number(size),
+      media_type: 'all',
+      tag: tagFilter.value,
+      search: searchQuery.value,
+      start_date: startDate.value,
+      end_date: endDate.value,
+    }),
+    resolvePage: (data) => data.page,
+    resolvePageCount: (data) => data.page_count,
+    resolveTotal: (data) => data.total,
+    apply: (data) => {
+      files.value = data.items
+      totalSize.value = data.total_size_bytes
+      counts.value = data.facets.media_types
+      allTags.value = data.facets.tags
+      genboxPushEnabled.value = data.capabilities.genbox_push
       options.onApplied?.()
     },
     onError: (message) => {
       options.toast.error(message, '加载失败')
-    },
-    onSettled: (latest) => {
-      if (latest) hasLoadedOnce.value = true
     },
   })
 
   const currentPage = galleryQuery.currentPage
   const pageCount = galleryQuery.pageCount
   const totalItems = galleryQuery.total
+  const hasLoadedOnce = galleryQuery.hasResolved
   const paginationSummary = computed(() => formatPaginationSummary(
     galleryQuery.paginationSummary.value.page,
     galleryQuery.paginationSummary.value.pageCount,
@@ -137,6 +134,10 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
     totalSize,
     isLoading,
     hasLoadedOnce,
+    isInitialLoading: galleryQuery.isInitialLoading,
+    isRefreshing: galleryQuery.isRefreshing,
+    hasSnapshot: galleryQuery.hasSnapshot,
+    isEmpty: galleryQuery.isEmpty,
     galleryLoadError,
     tagFilter,
     searchQuery,
@@ -145,6 +146,7 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
     pageSize,
     counts,
     allTags,
+    genboxPushEnabled,
     tagOptions,
     currentPage,
     pageCount,

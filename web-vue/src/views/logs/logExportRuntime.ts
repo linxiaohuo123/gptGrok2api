@@ -1,15 +1,10 @@
 import { computed, type Ref } from 'vue'
-import type { RuntimeLog, RuntimeLogsResponse, SystemLogRow, SystemLogsResponse } from '@/api/logs'
+import type { SystemLogRow, SystemLogsResponse } from '@/api/logs'
 import { saveBlob } from '@/lib/downloads'
 
-export type LogExportView = 'system' | 'runtime'
-
 export type LogExportRuntimeInput = {
-  activeLogView: Ref<LogExportView>
   logs: Ref<SystemLogRow[]>
-  runtimeLogs: Ref<RuntimeLog[]>
   logMeta: SystemLogsResponse
-  runtimeMeta: RuntimeLogsResponse
   currentPage: Readonly<Ref<number>>
 }
 
@@ -26,11 +21,7 @@ function saveJsonBlob(payload: unknown, filename: string) {
 }
 
 export function useLogExportRuntime(input: LogExportRuntimeInput) {
-  const activeExportDisabled = computed(() => (
-    input.activeLogView.value === 'runtime'
-      ? input.runtimeLogs.value.length === 0
-      : input.logs.value.length === 0
-  ))
+  const exportDisabled = computed(() => input.logs.value.length === 0)
 
   function exportSystemLogs() {
     saveJsonBlob(
@@ -40,33 +31,12 @@ export function useLogExportRuntime(input: LogExportRuntimeInput) {
         total: input.logMeta.total,
         logs: input.logs.value.map((item) => item.raw),
       },
-      `logs_${exportTimestamp()}.json`,
+      `logs_summary_${exportTimestamp()}.json`,
     )
-  }
-
-  function exportRuntimeLogs() {
-    saveJsonBlob(
-      {
-        exported_at: new Date().toISOString(),
-        total: input.runtimeMeta.total,
-        logs: input.runtimeLogs.value,
-      },
-      `runtime_logs_${exportTimestamp()}.json`,
-    )
-  }
-
-  function exportActiveLogs() {
-    if (input.activeLogView.value === 'runtime') {
-      exportRuntimeLogs()
-      return
-    }
-    exportSystemLogs()
   }
 
   return {
-    activeExportDisabled,
+    exportDisabled,
     exportSystemLogs,
-    exportRuntimeLogs,
-    exportActiveLogs,
   }
 }

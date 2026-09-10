@@ -1,3 +1,8 @@
+// [INPUT]: internal/provider，标准库（os、net/http 等）
+// [OUTPUT]: 迁移兼容路由：版本元数据、/internal/* 调度器与监控、备份/存储测试、iCloud 代理转发
+// [POS]: Go 版补齐 Python 版接口的兼容层。支持调度器 execute 真实生图闭环与内部监控。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -14,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
 const (
@@ -281,7 +288,7 @@ func (s *Server) backupTest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "backend": "local", "directory": s.backupDir()})
+	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true, "status": http.StatusOK, "backend": "local", "directory": s.backupDir()}})
 }
 
 func (s *Server) imageStorageTest(w http.ResponseWriter, r *http.Request) {
@@ -292,13 +299,18 @@ func (s *Server) imageStorageTest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
-	for _, directory := range []string{s.cfg.ImageDataDir, s.cfg.VideoDataDir} {
-		if err := os.MkdirAll(directory, 0o755); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
+	if err := os.MkdirAll(s.cfg.ImageDataDir, 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "backend": "local"})
+	// Go 版只有本地目录，没有 WebDAV。这里如实报失败，
+	// 否则界面会在什么都没测的情况下显示"WebDAV 测试通过"。
+	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{
+		"ok":      false,
+		"status":  0,
+		"backend": "local",
+		"error":   "Go 版未实现 WebDAV 图片存储，图片仅保存在本地目录",
+	}})
 }
 
 func (s *Server) imageStorageSync(w http.ResponseWriter, r *http.Request) {
@@ -309,8 +321,15 @@ func (s *Server) imageStorageSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
-	items := append(listMediaItems(s.cfg.ImageDataDir, "image", ""), listMediaItems(s.cfg.VideoDataDir, "video", "video/")...)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "synced": len(items), "total_size": mediaItemsSize(items)})
+	// 没有远端可传：本地已有的图片一律计入 skipped，绝不虚报 uploaded。
+	items := listMediaItems(s.cfg.ImageDataDir, "image", "")
+	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{
+		"uploaded":   0,
+		"skipped":    len(items),
+		"failed":     0,
+		"backend":    "local",
+		"total_size": mediaItemsSize(items),
+	}})
 }
 
 func (s *Server) proxyProfileByID(w http.ResponseWriter, r *http.Request) {
@@ -443,10 +462,12 @@ func (s *Server) internalImageScheduler(w http.ResponseWriter, r *http.Request) 
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/internal/image-scheduler/")
 	if path == "status" && r.Method == http.MethodGet {
+		// 必须在锁内拷贝：reserve/execute/release 都在改这些 map，
+		// 出锁后才序列化等于没加锁。
 		s.schedulerMu.Lock()
 		items := make([]map[string]any, 0, len(s.schedulerLeases))
 		for _, item := range s.schedulerLeases {
-			items = append(items, item)
+			items = append(items, cloneMap(item))
 		}
 		s.schedulerMu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"runtime": "go", "active": len(items), "reservations": items})
@@ -457,12 +478,13 @@ func (s *Server) internalImageScheduler(w http.ResponseWriter, r *http.Request) 
 		if !decodeJSON(w, r, &body) {
 			return
 		}
-		id := "reservation_" + randomID()
+		id := externalID("reservation")
 		item := map[string]any{"id": id, "reservation_id": id, "model": firstNonEmpty(stringValue(body["model"]), "gpt-image-2"), "status": "reserved", "created_at": time.Now().UTC()}
 		s.schedulerMu.Lock()
 		s.schedulerLeases[id] = item
 		s.schedulerMu.Unlock()
-		writeJSON(w, http.StatusOK, item)
+		// 交出的是快照：这个 map 已经进了 leases，随时会被 execute 改写。
+		writeJSON(w, http.StatusOK, cloneMap(item))
 		return
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -487,8 +509,108 @@ func (s *Server) internalImageScheduler(w http.ResponseWriter, r *http.Request) 
 	if action == "execute" || action == "execute-edit" {
 		item["status"] = "claimed"
 		item["claimed_at"] = time.Now().UTC()
+		lease := cloneMap(item)
 		s.schedulerMu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lease": item, "execution": "handled directly by Go public image endpoint"})
+
+		if s.openAIImage == nil || s.accountPool == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lease": lease, "execution": "handled directly by Go public image endpoint"})
+			return
+		}
+
+		if action == "execute-edit" {
+			parsed, err := s.parseImageEditRequest(r)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+				return
+			}
+			// 与公开的 /v1/images/edits 同一套上界。此前这条内部路径完全不校验 n，
+			// 一个 n=100000 的请求足以让分配与 goroutine 数量线性膨胀。
+			if !validImageCount(parsed.N, maxImageEditCount) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("n must be between 1 and %d", maxImageEditCount), "invalid_request_error")
+				return
+			}
+			data, err := s.generateOpenAIImageData(r, r.Context(), parsed.Prompt, parsed.Model, parsed.Size, parsed.Quality, parsed.Inputs, parsed.ResponseFormat, requestPublicBase(r), parsed.N)
+			if err != nil {
+				writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+			return
+		}
+
+		var payload struct {
+			Request map[string]any `json:"request"`
+			Model   string         `json:"model"`
+			Prompt  string         `json:"prompt"`
+			N       int            `json:"n"`
+			Size    string         `json:"size"`
+			Quality string         `json:"quality"`
+			Format  string         `json:"response_format"`
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body", "invalid_request_error")
+			return
+		}
+		_ = json.Unmarshal(raw, &payload)
+		prompt := payload.Prompt
+		modelName := payload.Model
+		size := payload.Size
+		quality := payload.Quality
+		format := payload.Format
+		count := payload.N
+		if payload.Request != nil {
+			if p := stringValue(payload.Request["prompt"]); p != "" {
+				prompt = p
+			}
+			if m := stringValue(payload.Request["model"]); m != "" {
+				modelName = m
+			}
+			if sz := stringValue(payload.Request["size"]); sz != "" {
+				size = sz
+			}
+			if q := stringValue(payload.Request["quality"]); q != "" {
+				quality = q
+			}
+			if f := stringValue(payload.Request["response_format"]); f != "" {
+				format = f
+			}
+			if n := intValue(payload.Request["n"]); n > 0 {
+				count = n
+			}
+		}
+		if strings.TrimSpace(prompt) == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lease": lease, "execution": "handled directly by Go public image endpoint"})
+			return
+		}
+		if strings.TrimSpace(modelName) == "" {
+			modelName = "gpt-image-2"
+		}
+		if count <= 0 {
+			count = 1
+		}
+		// 与公开的 /v1/images/generations 同一套上界，理由同 execute-edit。
+		if !validImageCount(count, maxImageGenerateCount) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("n must be between 1 and %d", maxImageGenerateCount), "invalid_request_error")
+			return
+		}
+		if size == "" {
+			size = "1024x1024"
+		}
+		size = provider.NormalizeOpenAIImageSize(size)
+		if format == "" {
+			format = "url"
+		}
+		if quality == "" {
+			quality = "auto"
+		}
+
+		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, quality, nil, format, requestPublicBase(r), count)
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 		return
 	}
 	s.schedulerMu.Unlock()
@@ -524,10 +646,17 @@ func (s *Server) internalCallLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// 内部端点一律 fail-closed：密钥没配就拒绝服务，而不是敞开。
+// 原实现写成 expected != "" && ...，于是"我忘了配"和"我不需要鉴权"
+// 变成了同一件事，而这两个端点对公网可达。
 func (s *Server) requireInternal(w http.ResponseWriter, r *http.Request) bool {
 	expected := strings.TrimSpace(os.Getenv("GO_IMAGE_SCHEDULER_KEY"))
+	if expected == "" {
+		writeError(w, http.StatusServiceUnavailable, "internal scheduler key is not configured", "not_configured")
+		return false
+	}
 	provided := strings.TrimSpace(r.Header.Get("X-Image-Scheduler-Key"))
-	if expected != "" && provided != expected {
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 		writeError(w, http.StatusUnauthorized, "invalid internal scheduler key", "authentication_error")
 		return false
 	}

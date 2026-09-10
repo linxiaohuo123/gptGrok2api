@@ -17,17 +17,16 @@
       <span v-else class="log-image-preview-cell__fallback">
         无法预览
       </span>
+      <span v-if="imageUrls.length > 1" class="log-image-preview-cell__count">
+        +{{ imageUrls.length - 1 }}
+      </span>
     </button>
-    <MetaChip v-if="imageUrls.length > 1" size="xs" tone="muted">
-      +{{ imageUrls.length - 1 }}
-    </MetaChip>
   </div>
   <span v-else class="log-image-preview-cell__empty">-</span>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import MetaChip from './MetaChip.vue'
 
 const props = defineProps<{
   imageUrls: string[]
@@ -61,6 +60,7 @@ const firstImageUrl = computed(() => props.imageUrls[0] || '')
   font-size: 10px;
   color: hsl(var(--muted-foreground));
   transition: border-color 0.18s ease;
+  flex: 0 0 56px;
 }
 
 .log-image-preview-cell__button:hover {
@@ -80,6 +80,23 @@ const firstImageUrl = computed(() => props.imageUrls[0] || '')
   align-items: center;
   justify-content: center;
   padding: 0 4px;
+  text-align: center;
+}
+
+.log-image-preview-cell__count {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid hsl(var(--background) / 0.75);
+  border-radius: 999px;
+  background: hsl(var(--foreground) / 0.78);
+  color: hsl(var(--background));
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
   text-align: center;
 }
 

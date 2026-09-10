@@ -1,52 +1,48 @@
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 
-import { accountsApi, normalizeAccountBackendStatus, type Account, type AccountBackendStatus } from '@/api/accounts'
+import {
+  accountsApi,
+  type Account,
+  type AccountOperationProgress,
+  type AccountProxyProjection,
+  type AccountSourceType,
+} from '@/api/accounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
+import type { useAccountBulkProgressRuntime } from './accountBulkProgressRuntime'
 
 export type AccountForm = {
   id: string
-  access_token: string
   email: string
-  user_id: string
-  login_password: string
-  two_factor_secret: string
+  access_token: string
+  refresh_token: string
   type: string
-  source_type: string
+  source_type: AccountSourceType
   group_id: string
   proxy: string
   quota: string
-  status: AccountBackendStatus
 }
 
 type AccountCrudRuntimeOptions = {
+  bulkProgress: ReturnType<typeof useAccountBulkProgressRuntime>
   loadData: (options?: { silentErrorToast?: boolean }) => Promise<void>
   loadAccountGroups: (options?: { silentErrorToast?: boolean }) => Promise<void>
   normalizeErrorMessage: (error: unknown) => string
   setError: (prefix: string, error: unknown, notify?: boolean) => void
+  isBatchBusy: () => boolean
 }
-
-const accountStatusOptions = [
-  { label: '正常', value: '正常' },
-  { label: '限流', value: '限流' },
-  { label: '异常', value: '异常' },
-  { label: '禁用', value: '禁用' },
-] as const
 
 function createDefaultForm(): AccountForm {
   return {
     id: '',
-    access_token: '',
     email: '',
-    user_id: '',
-    login_password: '',
-    two_factor_secret: '',
-    type: 'free',
+    access_token: '',
+    refresh_token: '',
+    type: '',
     source_type: 'web',
     group_id: '',
     proxy: '',
     quota: '',
-    status: '正常',
   }
 }
 
@@ -57,61 +53,101 @@ function normalizeQuota(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : undefined
 }
 
+function accountLabel(item: Pick<Account, 'id' | 'email' | 'display_name'>) {
+  return item.email.trim() || item.display_name.trim() || item.id
+}
+
 export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
   const saving = ref(false)
   const showModal = ref(false)
   const editingId = ref<string | null>(null)
-  const refreshingAccountId = ref('')
-  const resettingAccountId = ref('')
+  const syncingAccountIds = ref<Set<string>>(new Set())
+  const refreshingAccessTokenAccountIds = ref<Set<string>>(new Set())
+  const activeAccountOperationId = ref('')
+  const accountOperationBusy = computed(() => (
+    Boolean(activeAccountOperationId.value) || showModal.value || saving.value
+  ))
   const form = reactive(createDefaultForm())
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
-  let syncProxyControlsFromValue: (value: unknown) => void = () => {}
+  let syncProxyControlsFromProjection: (projection?: AccountProxyProjection) => void = () => {}
 
-  function setProxyControlsSync(sync: (value: unknown) => void) {
-    syncProxyControlsFromValue = sync
-    syncProxyControlsFromValue(form.proxy)
+  function setAccountPending(target: { value: Set<string> }, accountId: string, pending: boolean) {
+    const next = new Set(target.value)
+    if (pending) next.add(accountId)
+    else next.delete(accountId)
+    target.value = next
+  }
+
+  function beginAccountOperation(accountId: string) {
+    if (options.isBatchBusy() || accountOperationBusy.value) return false
+    activeAccountOperationId.value = accountId
+    return true
+  }
+
+  function endAccountOperation(accountId: string) {
+    if (activeAccountOperationId.value === accountId) activeAccountOperationId.value = ''
+  }
+
+  function finishMutationTask(
+    progress: AccountOperationProgress | null | undefined,
+  ) {
+    if (!progress) throw new Error('账号操作响应缺少进度投影')
+    options.bulkProgress.finish(progress)
+  }
+
+  function failAccountTask(label: string, action: string, error: unknown) {
+    options.bulkProgress.fail(
+      1,
+      Number(options.bulkProgress.refreshProgress.value?.processed || 0),
+      `账号 ${label} ${action}失败：${options.normalizeErrorMessage(error)}`,
+    )
+  }
+
+  function setProxyControlsSync(sync: (projection?: AccountProxyProjection) => void) {
+    syncProxyControlsFromProjection = sync
+    syncProxyControlsFromProjection()
   }
 
   function resetForm() {
     editingId.value = null
     Object.assign(form, createDefaultForm())
-    syncProxyControlsFromValue(form.proxy)
+    syncProxyControlsFromProjection()
   }
 
   function openCreateModal() {
+    if (options.isBatchBusy() || accountOperationBusy.value) return
     resetForm()
     void options.loadAccountGroups({ silentErrorToast: true })
     showModal.value = true
   }
 
   async function openEditModal(item: Account) {
+    if (!beginAccountOperation(item.id)) return
+    resetForm()
     editingId.value = item.id
-    form.id = item.id
-    form.access_token = item.access_token || ''
-    form.email = item.email || ''
-    form.user_id = item.user_id || ''
-    form.login_password = item.login_password || ''
-    form.two_factor_secret = item.two_factor_secret || ''
-    form.type = item.type || 'free'
-    form.source_type = item.source_type || 'web'
-    form.group_id = item.group_id || ''
-    form.proxy = item.proxy || ''
-    form.quota = item.image_quota_unknown ? '' : String(item.quota ?? '')
-    form.status = normalizeAccountBackendStatus(item.backend_status, item.enabled ? '正常' : '禁用')
-    syncProxyControlsFromValue(form.proxy)
-    void options.loadAccountGroups({ silentErrorToast: true })
-    showModal.value = true
     try {
-      const secrets = await accountsApi.getAccountSecrets(item.id)
+      const [detail] = await Promise.all([
+        accountsApi.get(item.id),
+        options.loadAccountGroups({ silentErrorToast: true }),
+      ])
       if (editingId.value !== item.id) return
-      form.access_token = secrets.access_token
-      form.email = secrets.email || form.email
-      form.user_id = secrets.user_id || form.user_id
-      form.login_password = secrets.login_password
-      form.two_factor_secret = secrets.two_factor_secret
+      form.id = detail.id
+      form.email = detail.email
+      form.access_token = ''
+      form.refresh_token = ''
+      form.type = detail.configuration.type
+      form.source_type = (detail.configuration.source_type || detail.source) as AccountSourceType
+      form.group_id = detail.configuration.group_id
+      form.proxy = detail.configuration.proxy
+      form.quota = detail.quota_unknown ? '' : String(detail.configuration.quota)
+      syncProxyControlsFromProjection(detail)
+      showModal.value = true
     } catch (error) {
-      options.setError('读取账号凭据失败', error)
+      if (editingId.value === item.id) resetForm()
+      options.setError('加载账号详情失败', error)
+    } finally {
+      endAccountOperation(item.id)
     }
   }
 
@@ -121,125 +157,155 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
   }
 
   async function saveAccount() {
-    if (!form.access_token.trim()) {
+    if (!editingId.value && !form.access_token.trim()) {
       toast.warning('Access token 不能为空')
       return
     }
 
     saving.value = true
-    const accountIdForNotice = editingId.value || form.id || ''
     const isEditing = Boolean(editingId.value)
 
     try {
       const payloadId = editingId.value || form.id || undefined
-      await accountsApi.upsert({
+      const result = await accountsApi.upsert({
         id: payloadId,
-        access_token: form.access_token.trim(),
-        email: form.email.trim() || undefined,
-        user_id: form.user_id.trim() || undefined,
-        login_password: form.login_password,
-        two_factor_secret: form.two_factor_secret.trim(),
-        type: form.type.trim() || undefined,
-        source_type: form.source_type.trim() || undefined,
+        access_token: form.access_token.trim() || undefined,
+        refresh_token: form.refresh_token.trim() || undefined,
+        type: form.type.trim(),
+        source_type: form.source_type,
         group_id: form.group_id.trim(),
         proxy: form.proxy.trim(),
         quota: normalizeQuota(form.quota),
-        backend_status: form.status,
-        enabled: form.status !== '禁用',
       })
-      toast.success(isEditing ? `账号 ${accountIdForNotice} 已更新` : '账号已添加')
+      const firstError = result.errors[0]
+      const errorDetail = firstError
+        ? [firstError.code, firstError.message].filter(Boolean).join(': ')
+        : ''
+      if (result.removed_ids.length > 0) {
+        throw new Error(errorDetail || '账号校验失败并已自动移除')
+      }
+      if (result.errors.length > 0) {
+        toast.warning(`账号已保存，但账号与额度同步失败${errorDetail ? `：${errorDetail}` : ''}`)
+        closeModal()
+        await options.loadData({ silentErrorToast: true })
+        return
+      }
+      if (!result.account) throw new Error('后端未返回更新后的账号')
+      toast.success(isEditing ? `账号 ${accountLabel(result.account)} 已更新` : '账号已添加')
       closeModal()
       await options.loadData({ silentErrorToast: true })
     } catch (error) {
       options.setError('保存失败', error)
+      await options.loadData({ silentErrorToast: true })
     } finally {
       saving.value = false
     }
   }
 
   async function toggleEnabled(item: Account) {
-    const nextEnabled = !item.enabled
-    const confirmed = await confirmDialog.ask({
-      title: nextEnabled ? '确认启用账号' : '确认禁用账号',
-      message: `即将${nextEnabled ? '启用' : '禁用'}账号 ${item.id}。这会影响该账号是否参与后续请求分配，是否继续？`,
-      confirmText: nextEnabled ? '启用' : '禁用',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
+    if (!beginAccountOperation(item.id)) return
+    const label = accountLabel(item)
+    const action = item.enabled_action
+    const actionLabel = item.enabled_action_label
+    let taskStarted = false
     try {
-      if (item.enabled) {
-        await accountsApi.disable(item.id)
-      } else {
-        await accountsApi.enable(item.id)
-      }
-      toast.success(`账号 ${item.id} 已${item.enabled ? '禁用' : '启用'}`)
+      const confirmed = await confirmDialog.ask({
+        title: `确认${actionLabel}`,
+        message: `即将对账号 ${label} 执行“${actionLabel}”。这会影响该账号是否参与后续请求分配，是否继续？`,
+        confirmText: actionLabel,
+        cancelText: '取消',
+      })
+      if (!confirmed) return
+
+      await options.bulkProgress.start(actionLabel, 1, 'mutation')
+      taskStarted = true
+      const result = action === 'enable'
+        ? await accountsApi.bulkEnable([item.id], undefined, 1)
+        : await accountsApi.bulkDisable([item.id], undefined, 1)
+      finishMutationTask(result.progress)
       await options.loadData({ silentErrorToast: true })
     } catch (error) {
-      options.setError('切换状态失败', error)
+      if (taskStarted) failAccountTask(label, actionLabel, error)
+      options.setError(`${actionLabel}失败`, error, !taskStarted)
+    } finally {
+      if (taskStarted) options.bulkProgress.end()
+      endAccountOperation(item.id)
     }
   }
 
-  async function refreshToken(accountId: string) {
-    const confirmed = await confirmDialog.ask({
-      title: '确认刷新账号',
-      message: `即将刷新账号 ${accountId} 的远端信息和额度，可能触发外部 ChatGPT 请求。是否继续？`,
-      confirmText: '开始刷新',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    refreshingAccountId.value = accountId
-    toast.info(`正在刷新账号 ${accountId} 的远端信息...`)
+  async function syncAccount(item: Account) {
+    const accountId = item.id
+    const label = accountLabel(item)
+    if (!beginAccountOperation(accountId)) return
+    let taskStarted = false
     try {
-      await accountsApi.refreshToken(accountId)
-      toast.success(`账号 ${accountId} 刷新成功`)
+      const confirmed = await confirmDialog.ask({
+        title: '同步账号与额度',
+        message: `即将同步账号 ${label} 的远端信息和额度，是否继续？`,
+        confirmText: '开始同步',
+        cancelText: '取消',
+      })
+      if (!confirmed) return
+
+      await options.bulkProgress.start('同步账号与额度', 1, 'sync')
+      taskStarted = true
+      setAccountPending(syncingAccountIds, accountId, true)
+      const result = await accountsApi.syncAccountsWithProgress([accountId], (progress) => {
+        options.bulkProgress.update({
+          ...progress,
+          total: 1,
+          processed: Math.min(1, Number(progress.processed || 0)),
+          done: false,
+        })
+      }, 1)
+      if (!result.progress) throw new Error('账号操作响应缺少进度投影')
+      options.bulkProgress.finish(result.progress)
       await options.loadData({ silentErrorToast: true })
     } catch (error) {
-      toast.error(`账号 ${accountId} 刷新失败：${options.normalizeErrorMessage(error)}`)
+      if (taskStarted) failAccountTask(label, '同步', error)
       await options.loadData({ silentErrorToast: true })
     } finally {
-      refreshingAccountId.value = ''
+      setAccountPending(syncingAccountIds, accountId, false)
+      if (taskStarted) options.bulkProgress.end()
+      endAccountOperation(accountId)
     }
   }
 
-  async function resetAccountState(accountId: string) {
-    const confirmed = await confirmDialog.ask({
-      title: '重置账号状态',
-      message: `是否重置账号 ${accountId} 的配额和冷却？此操作会清空本地计数并移除冷却状态。`,
-      confirmText: '确认重置',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    resettingAccountId.value = accountId
+  async function refreshAccessToken(item: Account) {
+    const accountId = item.id
+    const label = accountLabel(item)
+    if (!beginAccountOperation(accountId)) return
+    let taskStarted = false
     try {
-      await accountsApi.resetAccountState(accountId)
-      toast.success(`账号 ${accountId} 已重置`)
+      const confirmed = await confirmDialog.ask({
+        title: '刷新 AT',
+        message: `即将使用账号 ${label} 的 RT 刷新 AT，是否继续？`,
+        confirmText: '开始刷新',
+        cancelText: '取消',
+      })
+      if (!confirmed) return
+
+      await options.bulkProgress.start('刷新 AT', 1, 'credentials')
+      taskStarted = true
+      setAccountPending(refreshingAccessTokenAccountIds, accountId, true)
+      const result = await accountsApi.refreshAccessTokensWithProgress([accountId], (progress) => {
+        options.bulkProgress.update({
+          ...progress,
+          total: 1,
+          processed: Math.min(1, Number(progress.processed || 0)),
+          done: false,
+        })
+      }, 1)
+      if (!result.progress) throw new Error('账号操作响应缺少进度投影')
+      options.bulkProgress.finish(result.progress)
       await options.loadData({ silentErrorToast: true })
     } catch (error) {
-      toast.error(`账号 ${accountId} 重置失败：${options.normalizeErrorMessage(error)}`)
+      if (taskStarted) failAccountTask(label, '刷新 AT', error)
       await options.loadData({ silentErrorToast: true })
     } finally {
-      resettingAccountId.value = ''
-    }
-  }
-
-  async function removeAccount(accountId: string) {
-    const confirmed = await confirmDialog.ask({
-      title: '删除账号',
-      message: `确认删除账号 ${accountId} 吗？此操作不可恢复。`,
-      confirmText: '确认删除',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    try {
-      await accountsApi.delete(accountId)
-      toast.success(`账号 ${accountId} 已删除`)
-      await options.loadData({ silentErrorToast: true })
-    } catch (error) {
-      options.setError('删除失败', error)
+      setAccountPending(refreshingAccessTokenAccountIds, accountId, false)
+      if (taskStarted) options.bulkProgress.end()
+      endAccountOperation(accountId)
     }
   }
 
@@ -247,9 +313,9 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     saving,
     showModal,
     editingId,
-    refreshingAccountId,
-    resettingAccountId,
-    accountStatusOptions,
+    syncingAccountIds,
+    refreshingAccessTokenAccountIds,
+    accountOperationBusy,
     form,
     setProxyControlsSync,
     resetForm,
@@ -258,8 +324,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     closeModal,
     saveAccount,
     toggleEnabled,
-    refreshToken,
-    resetAccountState,
-    removeAccount,
+    syncAccount,
+    refreshAccessToken,
   }
 }

@@ -28,12 +28,17 @@ services:
       GO_PUBLIC_BASE_URL: ${GO_PUBLIC_BASE_URL:-}
       GO_QUEUE_BACKEND: ${GO_QUEUE_BACKEND:-redis}
       GO_REDIS_ADDR: ${GO_REDIS_ADDR:-redis:6379}
+      # 内部端点（/internal/*）的共享密钥；不配置则一律拒绝服务。
+      # 必须与下面 image-gateway 的 IMAGE_GATEWAY_SCHEDULER_KEY 一致。
+      GO_IMAGE_SCHEDULER_KEY: ${IMAGE_SCHEDULER_INTERNAL_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
+    # 只挂默认网络：image-gateway 通过服务名 app / image-queue-redis 访问它，
+    # 都在同一张默认网络上。这里曾额外挂一个 external 网络（name 硬编码成
+    # gptgrok2api_default），但全仓没有任何服务引用它或它的 alias——
+    # 唯一的效果是：当项目名（默认取目录名）不是 gptgrok2api 时，
+    # `docker compose up` 会以 "network ... declared as external, but could not be found" 中止。
     networks:
-      default:
-      upstream:
-        aliases:
-          - gptgrok2api-go
+      - default
 
   image-queue-redis:
     image: redis:7.4-alpine
@@ -89,9 +94,4 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
-networks:
-  upstream:
-    external: true
-    name: gptgrok2api_default
 

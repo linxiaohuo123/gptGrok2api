@@ -1,5 +1,10 @@
 //go:build !windows
 
+// [INPUT]: 仅标准库（syscall）
+// [OUTPUT]: diskUsage（Unix 实现）
+// [POS]: 磁盘容量查询的平台分支，与 disk_usage_windows.go 成对。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (

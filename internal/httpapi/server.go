@@ -1,7 +1,11 @@
+// [INPUT]: accounts/auth/config/model/oauth/protocol/provider/proxy/store/tasks 全部内部包
+// [OUTPUT]: 路由表与组装：New、Server、withMiddleware、withRequestMonitor、cloneMap（委托 store.CloneMap）、pageBounds
+// [POS]: HTTP 层的组装根：路由注册、中间件、Server 结构、通用工具函数。其余 httpapi 文件都挂在它提供的 Server 上。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -12,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,7 +35,6 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
-	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 	"github.com/auucoder/gptgrok2api-go/internal/store"
 	"github.com/auucoder/gptgrok2api-go/internal/tasks"
 )
@@ -43,26 +47,14 @@ type Server struct {
 	client             *http.Client
 	requestClient      *http.Client
 	accountPool        *accounts.Pool
-	chatProvider       *provider.GrokChat
-	consoleProvider    *provider.ConsoleChat
-	mediaProvider      *provider.Media
 	openAIImage        *provider.OpenAIImage
 	openAIChat         *provider.OpenAIChat
-	gptMail            *provider.GPTMail
-	xaiProbe           *provider.XAIProbe
-	grokQuota          *provider.GrokQuota
 	proxyManager       *proxyruntime.Manager
-	oauthStore         *oauth.Store
 	openAILogin        *oauth.OpenAILogin
 	agentIdentityStore *agentidentity.Store
-	deviceOAuth        *oauth.DeviceService
 	taskQueue          tasks.QueueAPI
-	registerStore      *registerruntime.Store
-	registerRuntime    *registerruntime.Runtime
 	monitor            *runtimeMonitor
 	logMu              sync.Mutex
-	videoMu            sync.RWMutex
-	videoJobs          map[string]*videoJob
 	imageTaskMu        sync.RWMutex
 	imageTasks         map[string]*imageTaskState
 	imageSlots         chan struct{}
@@ -71,15 +63,24 @@ type Server struct {
 	schedulerMu        sync.Mutex
 	schedulerLeases    map[string]map[string]any
 	external           *externalManager
+	importJobMu        sync.Mutex
 	refreshMu          sync.RWMutex
 	refreshProgress    map[string]*accountRefreshProgress
 	survivalMu         sync.RWMutex
 	survivalStatus     map[string]any
 	survivalRunning    bool
 	survivalWake       chan struct{}
-	probeStop          chan struct{}
-	probeWake          chan struct{}
 	proxyProbeURL      string
+	hourlyMetrics      *HourlyMetricsStore
+	startTime          time.Time
+	loginMu            sync.Mutex
+	loginAttempts      map[string]loginAttemptState
+	chatDedupe         *chatDeduplicator
+}
+
+type loginAttemptState struct {
+	count    int
+	lockedTo time.Time
 }
 
 func New(cfg config.Config) *Server {
@@ -89,7 +90,17 @@ func New(cfg config.Config) *Server {
 	proxyManager.ConfigureImageGroups(cfg.FallbackProxy, groups)
 	proxyManager.SetResource(cfg.ResourceProxyURL, cfg.ResourceProxyPool)
 	proxyManager.SetUpstreamsFile(cfg.ProxyUpstreamsFile)
-	proxyTransport := proxyruntime.NewTransport(http.DefaultTransport)
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	if baseTransport.MaxIdleConns < 1000 {
+		baseTransport.MaxIdleConns = 1000
+	}
+	if baseTransport.MaxIdleConnsPerHost < 100 {
+		baseTransport.MaxIdleConnsPerHost = 100
+	}
+	if baseTransport.IdleConnTimeout == 0 {
+		baseTransport.IdleConnTimeout = 90 * time.Second
+	}
+	proxyTransport := proxyruntime.NewTransport(baseTransport)
 	requestClient := &http.Client{Transport: proxyTransport, Timeout: cfg.RequestTimeout}
 	var taskQueue tasks.QueueAPI = tasks.New(cfg.QueuePath)
 	if cfg.QueueBackend == "redis" {
@@ -100,6 +111,8 @@ func New(cfg config.Config) *Server {
 			taskQueue = redisQueue
 		}
 	}
+	metricsPath := filepath.Join(cfg.DataDir, "hourly_metrics.json")
+	logsPath := filepath.Join(cfg.DataDir, "logs.jsonl")
 	server := &Server{
 		cfg:                cfg,
 		auth:               auth.New(cfg.APIKey, cfg.AdminKey, cfg.AuthKeysPath, cfg.AllowAnonymous, repository),
@@ -108,15 +121,8 @@ func New(cfg config.Config) *Server {
 		client:             &http.Client{Timeout: 0},
 		requestClient:      requestClient,
 		accountPool:        accounts.New(repository),
-		chatProvider:       provider.NewGrokChat(cfg.GrokChatURL, requestClient, cfg.RequestTimeout),
-		consoleProvider:    provider.NewConsoleChat(cfg.ConsoleURL, requestClient),
-		mediaProvider:      provider.NewMedia(requestClient, cfg.MediaChatURL, cfg.MediaPostURL, cfg.AssetUploadURL, cfg.AssetsBaseURL, cfg.RequestTimeout),
 		openAIImage:        provider.NewOpenAIImage(cfg.OpenAIBaseURL, requestClient, proxyManager, cfg.RequestTimeout),
-		gptMail:            provider.NewGPTMail(requestClient),
-		xaiProbe:           provider.NewXAIProbe(cfg.XAICLIBaseURL, cfg.XAICLITokenURL, requestClient),
-		grokQuota:          provider.NewGrokQuota(cfg.GrokRateLimitsURL, requestClient, proxyManager),
 		proxyManager:       proxyManager,
-		videoJobs:          map[string]*videoJob{},
 		imageTasks:         map[string]*imageTaskState{},
 		imageSlots:         makeImageSlots(cfg.ImageMaxConcurrency),
 		fileTasks:          map[string]*editableFileTaskState{},
@@ -125,37 +131,27 @@ func New(cfg config.Config) *Server {
 		refreshProgress:    map[string]*accountRefreshProgress{},
 		survivalStatus:     map[string]any{"running": false, "last_started_at": "", "last_finished_at": "", "last_error": "", "last_summary": map[string]any{}, "next_run_at": ""},
 		survivalWake:       make(chan struct{}, 1),
-		probeStop:          make(chan struct{}),
-		probeWake:          make(chan struct{}, 1),
-		oauthStore:         oauth.NewStore(cfg.OAuthPath, firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
 		openAILogin:        oauth.NewOpenAILogin(cfg.OpenAIAuthBaseURL, cfg.OpenAIPlatformBaseURL, cfg.OpenAILoginTokenURL, requestClient),
 		agentIdentityStore: agentidentity.NewStore(cfg.DataDir, cfg.OpenAIAgentRegisterURL, requestClient),
 		taskQueue:          taskQueue,
 		monitor:            newRuntimeMonitor(),
-		registerStore:      registerruntime.New(cfg.RegisterPath, cfg.GrokAccountsPath),
-		registerRuntime:    registerruntime.NewRuntime(),
+		hourlyMetrics:      NewHourlyMetricsStore(metricsPath, logsPath),
+		startTime:          time.Now(),
+		loginAttempts:      map[string]loginAttemptState{},
+		chatDedupe:         newChatDeduplicator(cfg.ChatDedupeTTL, cfg.ChatDedupeEnabled),
+	}
+	if server.openAIImage != nil {
+		server.openAIImage.PollTimeout = cfg.ImagePollTimeout
+		server.openAIImage.PollInterval = cfg.ImagePollInterval
+		server.openAIImage.InitialWait = cfg.ImagePollInitialWait
 	}
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
 	server.accountPool.SetInvalidCallback(server.maybeAutoRemoveInvalidAccount)
 	server.loadEditableFileTasks()
-	server.chatProvider.SetProxyManager(proxyManager)
-	server.consoleProvider.SetProxyManager(proxyManager)
-	server.mediaProvider.SetProxyManager(proxyManager)
-	server.deviceOAuth = oauth.NewDeviceService(requestClient, cfg.OAuthDeviceURL, cfg.OAuthTokenURL, server.oauthStore)
-	server.taskQueue.Register("grok_oauth_authorize", func(task *tasks.Task) (map[string]any, error) {
-		accountID := stringValue(task.Payload["account_id"])
-		_, _ = server.registerStore.SetOAuthAuthorization(accountID, "manual_action_required", "")
-		return map[string]any{
-			"status":     "manual_action_required",
-			"message":    "请使用 /api/grok/oauth/device/start 完成 xAI Device Code 授权",
-			"account_id": task.Payload["account_id"],
-		}, nil
-	})
 	if cfg.Version != "test" {
 		server.taskQueue.Start(2)
 		go server.imageRetentionScheduler()
-		go server.grokProbeScheduler()
 		go server.openAISurvivalScheduler()
 	}
 	return server
@@ -268,30 +264,33 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("/v1/responses", s.responses)
 	mux.HandleFunc("/v1/messages", s.messages)
+	mux.HandleFunc("/v1/search", s.searchAPI)
 	mux.HandleFunc("/v1/images/generations", s.imageGenerations)
 	mux.HandleFunc("/v1/images/edits", s.imageEdits)
 	mux.HandleFunc("/v1/files/image", s.imageFile)
-	mux.HandleFunc("/v1/files/video", s.videoFile)
 	mux.HandleFunc("/upimg/v1/files/image", s.imageFile)
-	mux.HandleFunc("/upimg/v1/files/video", s.videoFile)
-	mux.HandleFunc("/v1/files", s.files)
-	mux.HandleFunc("/v1/videos", s.videosCreate)
-	mux.HandleFunc("/v1/videos/", s.videoByID)
 	mux.HandleFunc("/v1/", s.v1)
-	mux.HandleFunc("/grok/", s.grok)
 	mux.HandleFunc("/auth/login", s.login)
 	mux.HandleFunc("/auth/status", s.authStatus)
 	mux.HandleFunc("/version", s.version)
 	mux.HandleFunc("/meta/update", s.metaUpdate)
+	mux.HandleFunc("/api/system/update", s.updateTriggerAPI)
+	mux.HandleFunc("/api/system/update-status", s.updateStatusAPI)
+	mux.HandleFunc("/api/system/update-task", s.updateTaskAPI)
 	mux.HandleFunc("/updates/VERSION", s.versionFile)
 	mux.HandleFunc("/updates/CHANGELOG.md", s.changelogFile)
 	mux.HandleFunc("/api/auth/users", s.userKeys)
 	mux.HandleFunc("/api/auth/users/", s.userKeyByID)
 	mux.HandleFunc("/api/accounts", s.accounts)
+	mux.HandleFunc("/api/accounts/", s.singleAccountAPI)
 	mux.HandleFunc("/api/accounts/token", s.accountToken)
+	mux.HandleFunc("/api/accounts/sync", s.accountRefreshStart)
 	mux.HandleFunc("/api/accounts/refresh", s.accountRefreshStart)
 	mux.HandleFunc("/api/accounts/refresh-at", s.accountAccessTokenRefresh)
+	mux.HandleFunc("/api/accounts/refresh-access-token", s.accountAccessTokenRefresh)
 	mux.HandleFunc("/api/accounts/refresh/progress/", s.accountRefreshProgressAPI)
+	mux.HandleFunc("/api/accounts/operations/", s.accountRefreshProgressAPI)
+	mux.HandleFunc("/api/accounts/selection-preview", s.accountSelectionPreviewAPI)
 	mux.HandleFunc("/api/accounts/oauth/start", s.accountOAuthStart)
 	mux.HandleFunc("/api/accounts/oauth/finish", s.accountOAuthFinish)
 	mux.HandleFunc("/api/accounts/export", s.accountExport)
@@ -311,9 +310,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/third-party-apps", s.thirdPartyApps)
 	mux.HandleFunc("/api/model-catalog", s.modelCatalog)
 	mux.HandleFunc("/api/logs", s.logsAPI)
+	mux.HandleFunc("/api/logs/", s.logDetailAPI)
 	mux.HandleFunc("/api/logs/delete", s.deleteLogs)
 	mux.HandleFunc("/api/runtime-logs", s.runtimeLogs)
 	mux.HandleFunc("/api/proxy/runtime", s.proxyRuntime)
+	mux.HandleFunc("/api/proxy/view", s.proxyViewAPI)
+	mux.HandleFunc("/api/proxy/defaults", s.proxyDefaultsAPI)
+	mux.HandleFunc("/api/proxy/nodes/import", s.proxyNodesImportAPI)
 	mux.HandleFunc("/api/prompts", s.prompts)
 	mux.HandleFunc("/api/admin/prompt-sources", s.promptSources)
 	mux.HandleFunc("/api/admin/prompt-sources/", s.promptSource)
@@ -323,11 +326,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/image-tasks/edits", s.imageTaskEdits)
 	mux.HandleFunc("/api/image-tasks/", s.imageTaskByID)
 	mux.HandleFunc("/api/storage/info", s.storageInfo)
-	mux.HandleFunc("/api/grok/oauth/", s.grokOAuth)
-	mux.HandleFunc("/accounts", s.grokOAuthLegacy)
-	mux.HandleFunc("/accounts/", s.grokOAuthLegacy)
-	mux.HandleFunc("/device/", s.grokOAuthLegacy)
-	mux.HandleFunc("/protocol/", s.grokOAuthProtocolLegacy)
 	mux.HandleFunc("/api/proxy/profiles", s.proxyProfiles)
 	mux.HandleFunc("/api/proxy/profiles/", s.proxyProfileByID)
 	mux.HandleFunc("/api/proxy/groups", s.proxyGroups)
@@ -351,19 +349,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/monitor/realtime/", s.monitorAPI)
 	mux.HandleFunc("/api/backups", s.backupsAPI)
 	mux.HandleFunc("/api/backups/", s.backupsAPI)
-	mux.HandleFunc("/api/register", s.registerAPI)
-	mux.HandleFunc("/api/register/", s.registerAPI)
+	mux.HandleFunc("/api/accounts/survival", s.openAISurvivalAPI)
+	mux.HandleFunc("/api/accounts/survival/", s.openAISurvivalAPI)
 	mux.HandleFunc("/api/cpa/pools", s.cpaPoolsAPI)
 	mux.HandleFunc("/api/cpa/pools/", s.cpaPoolAPI)
 	mux.HandleFunc("/api/sub2api/servers", s.sub2APIServersAPI)
 	mux.HandleFunc("/api/sub2api/servers/", s.sub2APIServerAPI)
-	mux.HandleFunc("/api/grok/runtime/admin/", s.grokRuntimeAdminAPI)
 	mux.HandleFunc("/api/tasks", s.taskAPI)
 	mux.HandleFunc("/api/tasks/", s.taskAPI)
 	mux.HandleFunc("/internal/image-monitor/", s.internalImageMonitor)
 	mux.HandleFunc("/internal/image-scheduler/", s.internalImageScheduler)
 	mux.HandleFunc("/internal/logs/call", s.internalCallLog)
-	mux.HandleFunc("/v1/search", s.searchAPI)
 	mux.HandleFunc("/v1/editable-file-tasks", s.editableFileTasksAPI)
 	mux.HandleFunc("/v1/editable-file-tasks/", s.editableFileTaskByID)
 	mux.HandleFunc("/v1/ppt/generations", s.pptGenerations)
@@ -378,8 +374,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Admin-Key")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Export-Requested, X-Exported, X-Skipped")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -433,11 +430,15 @@ func (s *Server) shouldMonitorRequest(r *http.Request) bool {
 		return false
 	}
 	path := strings.TrimRight(r.URL.Path, "/")
-	return path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/chat/completions"
+	return path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/chat/completions" || path == "/v1/search"
 }
 
+type decodedBodyKey struct{}
+
 func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next http.Handler) {
-	modelName, summary, requestShape := monitorRequestShape(r)
+	// 未授权的请求马上就会被 401 拒掉，没必要先把它的 body 整读进内存：
+	// 上限 64MB、还会复制两三份，匿名并发即可打爆。
+	modelName, summary, requestShape, decodedBytes := monitorRequestShape(r, s.auth.ValidAPIRequest(r))
 	id := newChatID()
 	s.monitor.start(id, r.URL.Path, modelName, summary)
 	proxySnapshot := s.proxyManager.Snapshot()
@@ -456,7 +457,11 @@ func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next
 	s.monitor.update(id, "handler_started", 10, "")
 	s.monitor.enrich(id, map[string]any{"metrics": map[string]any{"handler_queue_ms": 0}})
 	capture := &statusCaptureWriter{ResponseWriter: w}
-	next.ServeHTTP(capture, r.WithContext(context.WithValue(r.Context(), monitorCallIDKey{}, id)))
+	ctx := context.WithValue(r.Context(), monitorCallIDKey{}, id)
+	if len(decodedBytes) > 0 {
+		ctx = context.WithValue(ctx, decodedBodyKey{}, decodedBytes)
+	}
+	next.ServeHTTP(capture, r.WithContext(ctx))
 	status := capture.status
 	if status == 0 {
 		status = http.StatusOK
@@ -595,14 +600,18 @@ func accountFieldValue(fields map[string]any, key string) string {
 	return stringValue(current)
 }
 
-func monitorRequestShape(r *http.Request) (string, string, any) {
+func monitorRequestShape(r *http.Request, readBody bool) (string, string, any, []byte) {
 	if r == nil {
-		return "", "", ""
+		return "", "", "", nil
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	// 只看头就够了：请求即将被拒绝，body 一个字节都不该读。
+	if !readBody {
+		return "", "", map[string]any{"content_type": contentType}, nil
+	}
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			return "", "", "multipart/form-data"
+			return "", "", "multipart/form-data", nil
 		}
 		values := r.MultipartForm.Value
 		modelName := strings.TrimSpace(firstFormValue(values, "model"))
@@ -620,28 +629,36 @@ func monitorRequestShape(r *http.Request) (string, string, any) {
 		for _, key := range imageEditReferenceFields {
 			count += len(r.MultipartForm.File[key]) + len(values[key])
 		}
-		return modelName, summary, map[string]any{"content_type": "multipart/form-data", "image_url_parts": count, "data_url_images": count, "size": firstFormValue(values, "size")}
+		return modelName, summary, map[string]any{
+			"content_type":    "multipart/form-data",
+			"image_url_parts": count,
+			"data_url_images": count,
+			"size":            firstFormValue(values, "size"),
+			"quality":         firstFormValue(values, "quality"),
+			"response_format": firstFormValue(values, "response_format"),
+			"n":               firstFormValue(values, "n"),
+		}, nil
 	}
 	if r.Body == nil || (r.ContentLength > maxJSONBodyBytes && r.ContentLength != -1) {
-		return "", "", "application/json"
+		return "", "", "application/json", nil
 	}
 	if contentType != "application/json" && contentType != "" {
-		return "", "", contentType
+		return "", "", contentType, nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBodyBytes))
 	if err != nil {
 		r.Body = io.NopCloser(strings.NewReader(""))
-		return "", "", "application/json"
+		return "", "", "application/json", nil
 	}
 	r.Body = io.NopCloser(strings.NewReader(string(raw)))
 	decoded, ok := normalizeJSONBytes(raw, r.Header.Get("Content-Encoding"))
 	if !ok {
-		return "", "", "application/json"
+		return "", "", "application/json", nil
 	}
 	r.Body = io.NopCloser(bytes.NewReader(decoded))
 	var payload map[string]any
 	if json.Unmarshal(decoded, &payload) != nil {
-		return "", "", "application/json"
+		return "", "", "application/json", nil
 	}
 	modelName := stringValue(payload["model"])
 	summary := stringValue(payload["prompt"])
@@ -652,7 +669,15 @@ func monitorRequestShape(r *http.Request) (string, string, any) {
 		summary = summary[:180]
 	}
 	urlParts, dataURLs := imageReferenceStats(payload)
-	return modelName, summary, map[string]any{"content_type": "application/json", "image_url_parts": urlParts, "data_url_images": dataURLs, "size": stringValue(payload["size"])}
+	return modelName, summary, map[string]any{
+		"content_type":    "application/json",
+		"image_url_parts": urlParts,
+		"data_url_images": dataURLs,
+		"size":            stringValue(payload["size"]),
+		"quality":         stringValue(payload["quality"]),
+		"response_format": stringValue(payload["response_format"]),
+		"n":               payload["n"],
+	}, decoded
 }
 
 func imageReferenceStats(value any) (int, int) {
@@ -798,6 +823,11 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := s.checkSensitiveWords(protocol.ExtractMessage(request.Messages)); err != nil {
+		writeSensitiveWordError(w)
+		return
+	}
+	request = s.applyGlobalSystemPrompt(request)
 	if request.Temperature != nil && (*request.Temperature < 0 || *request.Temperature > 2) {
 		writeError(w, http.StatusBadRequest, "temperature must be between 0 and 2", "invalid_request_error")
 		return
@@ -811,10 +841,6 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
 	}
-	if route.Console {
-		s.consoleChatCompletions(w, r, request)
-		return
-	}
 	if route.Image {
 		if request.Stream {
 			s.streamOpenAIImageChat(w, r, request)
@@ -823,275 +849,10 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if route.OpenAI {
-		if request.Stream {
-			s.streamOpenAIChat(w, r, request, route)
-		} else {
-			s.completeOpenAIChat(w, r, request, route)
-		}
-		return
-	}
-	if len(request.Tools) > 0 || request.ToolChoice != nil {
-		if request.Stream {
-			s.streamToolChat(w, r, request, route)
-		} else {
-			s.completeChat(w, r, request, route)
-		}
-		return
-	}
 	if request.Stream {
-		s.streamChat(w, r, request, route)
-		return
-	}
-	s.completeChat(w, r, request, route)
-}
-
-func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
-	message := protocol.ExtractMessage(request.Messages)
-	if strings.TrimSpace(message) == "" {
-		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
-		return
-	}
-	if len(request.Tools) > 0 {
-		message = protocol.InjectToolPrompt(message, protocol.BuildToolSystemPrompt(request.Tools, request.ToolChoice))
-	}
-	responseID := newChatID()
-	excluded := map[string]bool{}
-	var text, thinking string
-	var lastErr error
-	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.Reserve(r.Context(), route.PoolCandidates, excluded)
-		if err != nil {
-			lastErr = err
-			break
-		}
-		s.enrichMonitorAccount(r, lease.Account)
-		payload := protocol.BuildGrokPayload(message, route.Mode, request.Temperature, request.TopP, request.MaxTokens)
-		response, err := s.chatProvider.Do(r.Context(), lease.Account, payload)
-		if err != nil {
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, err)
-			excluded[lease.Account.Token] = true
-			lastErr = err
-			if attempt < s.cfg.ChatMaxRetries {
-				continue
-			}
-			break
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			upstreamErr := provider.ReadError(response)
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
-			excluded[lease.Account.Token] = true
-			lastErr = upstreamErr
-			if s.shouldRetry(upstreamErr.Status, attempt) {
-				continue
-			}
-			break
-		}
-		var scanErr error
-		scanner := bufio.NewScanner(response.Body)
-		scanner.Buffer(make([]byte, 4096), 2<<20)
-		scanErr = protocol.ScanUpstream(scanner, func(event protocol.UpstreamEvent) error {
-			text += event.Text
-			thinking += event.Thinking
-			return nil
-		})
-		response.Body.Close()
-		s.accountPool.Release(lease)
-		if scanErr != nil {
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
-			excluded[lease.Account.Token] = true
-			lastErr = scanErr
-			if attempt < s.cfg.ChatMaxRetries {
-				text, thinking = "", ""
-				continue
-			}
-			break
-		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
-		lastErr = nil
-		break
-	}
-	if lastErr != nil {
-		status := http.StatusBadGateway
-		if errors.Is(lastErr, accounts.ErrUnavailable) {
-			status = http.StatusTooManyRequests
-		}
-		if upstreamErr, ok := lastErr.(*protocol.UpstreamError); ok && upstreamErr.Status >= 400 && upstreamErr.Status < 600 {
-			status = upstreamErr.Status
-		}
-		writeError(w, status, lastErr.Error(), "upstream_error")
-		return
-	}
-	response := map[string]any{
-		"id":      newChatIDFrom(responseID),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   request.Model,
-		"choices": []any{map[string]any{
-			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": text},
-			"finish_reason": "stop",
-		}},
-		"usage": usageFor(message, text, thinking),
-	}
-	if thinking != "" {
-		response["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["reasoning_content"] = thinking
-	}
-	if len(request.Tools) > 0 {
-		calls := protocol.ParseToolCalls(text, protocol.ToolNames(request.Tools))
-		if len(calls) > 0 {
-			toolCalls := make([]map[string]any, 0, len(calls))
-			for _, call := range calls {
-				toolCalls = append(toolCalls, map[string]any{"id": call.ID, "type": "function", "function": map[string]any{"name": call.Name, "arguments": call.Arguments}})
-			}
-			choice := response["choices"].([]any)[0].(map[string]any)
-			choice["message"] = map[string]any{"role": "assistant", "content": nil, "tool_calls": toolCalls}
-			choice["finish_reason"] = "tool_calls"
-		}
-	}
-	writeJSON(w, http.StatusOK, response)
-}
-
-func (s *Server) streamToolChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
-	recorder := &responseCapture{header: make(http.Header)}
-	request.Stream = false
-	s.completeChat(recorder, r, request, route)
-	if recorder.status >= 400 {
-		w.WriteHeader(recorder.status)
-		_, _ = w.Write(recorder.body.Bytes())
-		return
-	}
-	var response map[string]any
-	if json.Unmarshal(recorder.body.Bytes(), &response) != nil {
-		writeError(w, http.StatusBadGateway, "invalid internal tool response", "server_error")
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	choice := response["choices"].([]any)[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	if calls, ok := message["tool_calls"].([]any); ok {
-		for index, raw := range calls {
-			call, _ := raw.(map[string]any)
-			function, _ := call["function"].(map[string]any)
-			writeSSE(w, map[string]any{"id": response["id"], "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": index, "id": call["id"], "type": "function", "function": map[string]any{"name": function["name"], "arguments": function["arguments"]}}}}}}})
-		}
-		writeSSE(w, map[string]any{"id": response["id"], "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}})
+		s.streamOpenAIChat(w, r, request, route)
 	} else {
-		writeSSE(w, map[string]any{"id": response["id"], "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": message["content"]}}}})
-		writeSSE(w, map[string]any{"id": response["id"], "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
-	}
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-}
-
-func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
-	message := protocol.ExtractMessage(request.Messages)
-	if strings.TrimSpace(message) == "" {
-		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, _ := w.(http.Flusher)
-	responseID := newChatID()
-	excluded := map[string]bool{}
-	emitted := false
-	var lastErr error
-	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.Reserve(r.Context(), route.PoolCandidates, excluded)
-		if err != nil {
-			lastErr = err
-			break
-		}
-		s.enrichMonitorAccount(r, lease.Account)
-		payload := protocol.BuildGrokPayload(message, route.Mode, request.Temperature, request.TopP, request.MaxTokens)
-		response, err := s.chatProvider.Do(r.Context(), lease.Account, payload)
-		if err != nil {
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, err)
-			excluded[lease.Account.Token] = true
-			lastErr = err
-			if !emitted && attempt < s.cfg.ChatMaxRetries {
-				continue
-			}
-			break
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			upstreamErr := provider.ReadError(response)
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
-			excluded[lease.Account.Token] = true
-			lastErr = upstreamErr
-			if !emitted && s.shouldRetry(upstreamErr.Status, attempt) {
-				continue
-			}
-			break
-		}
-		scanner := bufio.NewScanner(response.Body)
-		scanner.Buffer(make([]byte, 4096), 2<<20)
-		scanErr := protocol.ScanUpstream(scanner, func(event protocol.UpstreamEvent) error {
-			if event.Text == "" && event.Thinking == "" && !event.SoftStop {
-				return nil
-			}
-			if !emitted {
-				writeSSE(w, map[string]any{
-					"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model,
-					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}},
-				})
-				emitted = true
-			}
-			if event.Text != "" {
-				writeSSE(w, map[string]any{
-					"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model,
-					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": event.Text}}},
-				})
-			}
-			if event.Thinking != "" && request.ReasoningEffort != "none" {
-				writeSSE(w, map[string]any{
-					"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model,
-					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"reasoning_content": event.Thinking}}},
-				})
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-			return nil
-		})
-		response.Body.Close()
-		s.accountPool.Release(lease)
-		if scanErr != nil {
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
-			excluded[lease.Account.Token] = true
-			lastErr = scanErr
-			if !emitted && attempt < s.cfg.ChatMaxRetries {
-				continue
-			}
-			break
-		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
-		lastErr = nil
-		break
-	}
-	if lastErr != nil {
-		writeSSE(w, map[string]any{"error": map[string]any{"message": lastErr.Error(), "type": "upstream_error"}})
-	}
-	if !emitted {
-		writeSSE(w, map[string]any{
-			"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model,
-			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}},
-		})
-	}
-	writeSSE(w, map[string]any{
-		"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model,
-		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
-	})
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
+		s.completeOpenAIChat(w, r, request, route)
 	}
 }
 
@@ -1102,17 +863,13 @@ func (s *Server) shouldRetry(status, attempt int) bool {
 func writeSSE(w http.ResponseWriter, value any) {
 	raw, _ := json.Marshal(value)
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func newChatID() string {
 	return fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
-}
-
-func newChatIDFrom(value string) string {
-	if value != "" {
-		return value
-	}
-	return newChatID()
 }
 
 func usageFor(prompt, completion, reasoning string) map[string]any {
@@ -1124,13 +881,6 @@ func usageFor(prompt, completion, reasoning string) map[string]any {
 		"completion_tokens": completionTokens + reasoningTokens,
 		"total_tokens":      promptTokens + completionTokens + reasoningTokens,
 	}
-}
-
-func (s *Server) grok(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAPI(w, r) {
-		return
-	}
-	writeError(w, http.StatusNotFound, "Grok endpoint not found", "not_found")
 }
 
 func (s *Server) adminAPI(w http.ResponseWriter, r *http.Request) {
@@ -1176,47 +926,139 @@ func (s *Server) proxyUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func clientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		parts := strings.Split(fwd, ",")
+		if ip := strings.TrimSpace(parts[0]); ip != "" {
+			return ip
+		}
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
+	ip := clientIP(r)
+	now := time.Now()
+	s.loginMu.Lock()
+	if s.loginAttempts == nil {
+		s.loginAttempts = map[string]loginAttemptState{}
+	}
+	if state, exists := s.loginAttempts[ip]; exists && state.lockedTo.After(now) {
+		remaining := int(time.Until(state.lockedTo).Seconds())
+		s.loginMu.Unlock()
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": map[string]any{
+				"message": fmt.Sprintf("登录失败次数过多，请在 %d 秒后再试", remaining),
+				"type":    "rate_limit_error",
+			},
+		})
+		return
+	}
+	s.loginMu.Unlock()
+
 	token := s.auth.APIKey(r)
 	identity, ok := s.auth.Identity(token)
 	if !ok {
+		s.loginMu.Lock()
+		state := s.loginAttempts[ip]
+		state.count++
+		if state.count >= 5 {
+			state.lockedTo = now.Add(5 * time.Minute)
+			state.count = 0
+		}
+		s.loginAttempts[ip] = state
+		if len(s.loginAttempts) > 2000 {
+			for k, v := range s.loginAttempts {
+				if v.lockedTo.Before(now) {
+					delete(s.loginAttempts, k)
+				}
+			}
+		}
+		s.loginMu.Unlock()
+
 		writeError(w, http.StatusUnauthorized, "invalid authentication token", "authentication_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"authenticated": true,
-		"version":       s.cfg.Version,
-		"role":          identity.Role,
-		"subject_id":    identity.ID,
-		"name":          identity.Name,
-	})
+
+	s.loginMu.Lock()
+	delete(s.loginAttempts, ip)
+	s.loginMu.Unlock()
+
+	writeJSON(w, http.StatusOK, s.authViewResponse(true, identity))
+}
+
+func (s *Server) authViewResponse(authenticated bool, identity store.Identity) map[string]any {
+	if !authenticated {
+		return map[string]any{
+			"ok":             false,
+			"authenticated":  false,
+			"schema_version": 1,
+			"version":        s.cfg.Version,
+			"subject":        nil,
+			"capabilities": map[string]any{
+				"admin_console": false,
+				"studio":        false,
+			},
+			"home_route": "/login",
+		}
+	}
+	role := strings.ToLower(strings.TrimSpace(identity.Role))
+	if role != "admin" && role != "user" {
+		role = "unknown"
+	}
+	isAdmin := role == "admin"
+	homeRoute := "/studio"
+	if isAdmin {
+		homeRoute = "/"
+	}
+	subjectID := strings.TrimSpace(identity.ID)
+	if subjectID == "" {
+		subjectID = "authenticated"
+	}
+	subjectName := strings.TrimSpace(identity.Name)
+	if subjectName == "" {
+		subjectName = subjectID
+	}
+	return map[string]any{
+		"ok":             true,
+		"authenticated":  true,
+		"schema_version": 1,
+		"runtime":        "go",
+		"version":        s.cfg.Version,
+		"role":           role,
+		"subject_id":     subjectID,
+		"name":           subjectName,
+		"subject": map[string]any{
+			"id":   subjectID,
+			"name": subjectName,
+			"role": role,
+		},
+		"capabilities": map[string]any{
+			"admin_console": isAdmin,
+			"studio":        true,
+		},
+		"home_route": homeRoute,
+	}
 }
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	token := s.auth.APIKey(r)
 	identity, ok := s.auth.Identity(token)
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":            false,
-			"authenticated": false,
-			"version":       s.cfg.Version,
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"authenticated": true,
-		"runtime":       "go",
-		"version":       s.cfg.Version,
-		"role":          identity.Role,
-		"subject_id":    identity.ID,
-		"name":          identity.Name,
-	})
+	writeJSON(w, http.StatusOK, s.authViewResponse(ok, identity))
 }
 
 func (s *Server) userKeys(w http.ResponseWriter, r *http.Request) {
@@ -1392,14 +1234,7 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = append(filtered, accountForAPI(item))
 	}
-	start := (page - 1) * pageSize
-	if start > len(filtered) {
-		start = len(filtered)
-	}
-	end := start + pageSize
-	if end > len(filtered) {
-		end = len(filtered)
-	}
+	start, end := pageBounds(page, pageSize, len(filtered))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":     filtered[start:end],
 		"accounts":  filtered[start:end],
@@ -1435,6 +1270,12 @@ func (s *Server) addAccounts(w http.ResponseWriter, r *http.Request) {
 	if returnItems {
 		response["items"] = accountsForAPI(items)
 	}
+	// 前端 accountOperationPresentation 强校验这组投影。缺失时抛出点位于返回
+	// 对象字面量处——账号其实已经入库，用户看到的却是"导入失败"。
+	mergeAccountMutation(response, fmt.Sprintf("新增 %d 个，跳过 %d 个", added, skipped), map[string]int{
+		"added":   added,
+		"skipped": skipped,
+	})
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1447,15 +1288,16 @@ func (s *Server) cleanupImportedAbnormalAccounts(w http.ResponseWriter, r *http.
 		return
 	}
 	var body struct {
+		accountSelectionBody
 		AccessTokens []string `json:"access_tokens"`
 		Remove       bool     `json:"remove"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	refs := uniqueAccountRefs(body.AccessTokens)
+	refs := uniqueAccountRefs(append(append([]string{}, body.AccessTokens...), body.refs()...))
 	if len(refs) == 0 {
-		writeError(w, http.StatusBadRequest, "access_tokens is required", "invalid_request_error")
+		writeError(w, http.StatusBadRequest, "access_tokens or account_ids is required", "invalid_request_error")
 		return
 	}
 	items, err := s.store.AccountList()
@@ -1499,13 +1341,16 @@ func (s *Server) cleanupImportedAbnormalAccounts(w http.ResponseWriter, r *http.
 
 func (s *Server) deleteAccounts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		accountSelectionBody
 		Tokens []string `json:"tokens"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if len(body.Tokens) == 0 {
-		writeError(w, http.StatusBadRequest, "tokens is required", "invalid_request_error")
+	// 前端发的是 account_ids / selection，不是 tokens。
+	refs := uniqueAccountRefs(append(append([]string{}, body.Tokens...), body.refs()...))
+	if len(refs) == 0 {
+		writeError(w, http.StatusBadRequest, "tokens or account_ids is required", "invalid_request_error")
 		return
 	}
 	items, err := s.store.AccountList()
@@ -1513,7 +1358,7 @@ func (s *Server) deleteAccounts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	tokens, missing := resolveAccountRefTokens(items, body.Tokens)
+	tokens, missing := resolveAccountRefTokens(items, refs)
 	removed, items, err := s.store.DeleteAccounts(tokens)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -1534,9 +1379,22 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	ref := strings.TrimSpace(stringValue(body["access_token"]))
+	// 前端用 id 标识目标账号：改配额或分组时根本不带 access_token（它是可选字段），
+	// 而这里历来只认 access_token。两者都接受——否则"编辑账号"一律 400，
+	// 用户看到"保存失败"，实际上什么都没保存。
+	// resolveAccountRefTokens 认得 token / id / account_ref / email 等各种引用。
+	// 前端用 id 标识目标账号：改配额或分组时根本不带 access_token（它是可选字段），
+	// 而这里历来只认 access_token。两者都接受——否则"编辑账号"一律 400，
+	// 用户看到"保存失败"，实际上什么都没保存。
+	// resolveAccountRefTokens 认得 token / id / account_ref / email 等各种引用。
+	ref := firstNonEmpty(
+		stringValue(body["access_token"]),
+		stringValue(body["id"]),
+		stringValue(body["account_ref"]),
+		stringValue(body["account_id"]),
+	)
 	if ref == "" {
-		writeError(w, http.StatusBadRequest, "access_token is required", "invalid_request_error")
+		writeError(w, http.StatusBadRequest, "id or access_token is required", "invalid_request_error")
 		return
 	}
 	current, err := s.store.AccountList()
@@ -1569,7 +1427,9 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"item": accountForAPI(item), "items": accountsForAPI(items)})
+	response := map[string]any{"item": accountForAPI(item), "items": accountsForAPI(items)}
+	mergeAccountMutation(response, "账号已更新", map[string]int{"updated": 1})
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) batchUpdateAccounts(w http.ResponseWriter, r *http.Request) {
@@ -1577,14 +1437,17 @@ func (s *Server) batchUpdateAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		accountSelectionBody
 		AccessTokens []string `json:"access_tokens"`
 		Status       string   `json:"status"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if len(body.AccessTokens) == 0 || strings.TrimSpace(body.Status) == "" {
-		writeError(w, http.StatusBadRequest, "access_tokens and status are required", "invalid_request_error")
+	// 前端发的是 account_ids / selection，不是 access_tokens。
+	refs := uniqueAccountRefs(append(append([]string{}, body.AccessTokens...), body.refs()...))
+	if len(refs) == 0 || strings.TrimSpace(body.Status) == "" {
+		writeError(w, http.StatusBadRequest, "access_tokens or account_ids, and status, are required", "invalid_request_error")
 		return
 	}
 	current, err := s.store.AccountList()
@@ -1592,7 +1455,7 @@ func (s *Server) batchUpdateAccounts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	tokens, missing := resolveAccountRefTokens(current, body.AccessTokens)
+	tokens, missing := resolveAccountRefTokens(current, refs)
 	updated := 0
 	errItems := make([]string, 0, len(missing))
 	for _, ref := range missing {
@@ -1624,6 +1487,7 @@ func (s *Server) bindAccountGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		accountSelectionBody
 		AccessTokens []string `json:"access_tokens"`
 		GroupID      string   `json:"group_id"`
 	}
@@ -1634,13 +1498,20 @@ func (s *Server) bindAccountGroup(w http.ResponseWriter, r *http.Request) {
 	if groupID == "__ungrouped__" {
 		groupID = ""
 	}
+	// 这里原本既不认 account_ids、也不检查空值：前端发 account_ids 时
+	// refs 解析为空，循环一次不跑，接口却返回 200 —— 一个纯粹的静默 no-op。
+	refs := uniqueAccountRefs(append(append([]string{}, body.AccessTokens...), body.refs()...))
+	if len(refs) == 0 {
+		writeError(w, http.StatusBadRequest, "access_tokens or account_ids is required", "invalid_request_error")
+		return
+	}
 	updated := 0
 	current, err := s.store.AccountList()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	tokens, missing := resolveAccountRefTokens(current, body.AccessTokens)
+	tokens, missing := resolveAccountRefTokens(current, refs)
 	errItems := make([]string, 0, len(missing))
 	for _, ref := range missing {
 		errItems = append(errItems, tokenPreview(ref)+"... not found")
@@ -1659,12 +1530,17 @@ func (s *Server) bindAccountGroup(w http.ResponseWriter, r *http.Request) {
 	if all == nil {
 		all, _ = s.store.AccountList()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"updated":  updated,
 		"errors":   errItems,
 		"group_id": groupID,
 		"items":    accountsForAPI(all),
+	}
+	mergeAccountMutation(response, fmt.Sprintf("已绑定 %d 个账号", updated), map[string]int{
+		"updated": updated,
+		"errors":  len(errItems),
 	})
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) accountGroups(w http.ResponseWriter, r *http.Request) {
@@ -1786,8 +1662,16 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"runtime": "go", "config": configValue})
-	case http.MethodPost:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"schema_version": 1,
+			"generated_at":   time.Now().UTC().Format(time.RFC3339),
+			"revision":       settingsRevision(configValue),
+			"settings":       cleanSettingsView(configValue),
+			"fields":         map[string]any{},
+			"runtime":        "go",
+			"config":         configValue,
+		})
+	case http.MethodPost, http.MethodPatch:
 		var updates map[string]any
 		if !decodeJSON(w, r, &updates) {
 			return
@@ -1797,7 +1681,21 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
+		changedKeys := make([]string, 0, len(updates))
 		for key, value := range updates {
+			if key == "revision" {
+				continue
+			}
+			changedKeys = append(changedKeys, key)
+			if srcMap, ok := value.(map[string]any); ok {
+				if dstMap, ok := current[key].(map[string]any); ok {
+					for subKey, subVal := range srcMap {
+						dstMap[subKey] = subVal
+					}
+					current[key] = dstMap
+					continue
+				}
+			}
 			current[key] = value
 		}
 		if err := s.store.ReplaceConfig(current); err != nil {
@@ -1808,7 +1706,41 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"runtime": "go", "config": current})
+		if val := intValue(current["image_poll_timeout_secs"]); val > 0 {
+			s.cfg.ImagePollTimeout = time.Duration(val) * time.Second
+			if s.openAIImage != nil {
+				s.openAIImage.PollTimeout = s.cfg.ImagePollTimeout
+			}
+		}
+		if val := intValue(current["image_poll_interval_secs"]); val > 0 {
+			s.cfg.ImagePollInterval = time.Duration(val) * time.Second
+			if s.openAIImage != nil {
+				s.openAIImage.PollInterval = s.cfg.ImagePollInterval
+			}
+		}
+		if current["image_poll_initial_wait_secs"] != nil {
+			val := intValue(current["image_poll_initial_wait_secs"])
+			if val >= 0 {
+				s.cfg.ImagePollInitialWait = time.Duration(val) * time.Second
+				if s.openAIImage != nil {
+					s.openAIImage.InitialWait = s.cfg.ImagePollInitialWait
+				}
+			}
+		}
+		if val := intValue(current["console_request_timeout_secs"]); val > 0 {
+			s.cfg.ConsoleRequestTimeout = time.Duration(val) * time.Second
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"schema_version":   1,
+			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+			"revision":         settingsRevision(current),
+			"settings":         cleanSettingsView(current),
+			"fields":           map[string]any{},
+			"changed_fields":   changedKeys,
+			"restart_required": false,
+			"runtime":          "go",
+			"config":           current,
+		})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 	}
@@ -1828,6 +1760,19 @@ func (s *Server) storageInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if decoded, ok := r.Context().Value(decodedBodyKey{}).([]byte); ok && len(decoded) > 0 {
+		if err := json.Unmarshal(decoded, target); err != nil {
+			var wrapped string
+			if json.Unmarshal(decoded, &wrapped) == nil {
+				if inner := strings.TrimSpace(wrapped); inner != "" && json.Unmarshal([]byte(inner), target) == nil {
+					return true
+				}
+			}
+			writeError(w, http.StatusBadRequest, describeJSONBodyError(err), "invalid_request_error")
+			return false
+		}
+		return true
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1920,6 +1865,29 @@ func positiveInt(raw string, fallback int) int {
 	return value
 }
 
+// pageBounds 把外部传入的页码换算成绝对安全的切片边界。
+//
+// 越界判定用除法而非乘法：(page-1)*pageSize 在 page 取 int64 极大值时
+// 会回绕成负数，而负数既躲过 "start > len" 的钳制，又能让 "end > len"
+// 同样失效，最终以 slice bounds out of range 的形式 panic 掉整个请求。
+// 先做 page-1 > total/pageSize 的比较，乘积便不可能溢出。
+//
+// 返回值恒满足 0 <= start <= end <= total，调用方无需再判。
+func pageBounds(page, pageSize, total int) (int, int) {
+	if page < 1 || pageSize < 1 || total <= 0 {
+		return 0, 0
+	}
+	if page-1 > total/pageSize {
+		return total, total
+	}
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return start, end
+}
+
 func accountForAPI(account map[string]any) map[string]any {
 	item := cloneMap(account)
 	ref := accountPublicRef(account)
@@ -1967,7 +1935,7 @@ func accountStatusCategory(account map[string]any) string {
 		return "limited"
 	}
 	switch reason {
-	case "pro_cooldown", "video_cooldown", "lane_backoff", "lane_degraded", "image_generation_unavailable", "image_quota_exhausted", "text_pending":
+	case "pro_cooldown", "lane_backoff", "lane_degraded", "image_generation_unavailable", "image_quota_exhausted", "text_pending":
 		return "limited"
 	}
 	switch errorKind {
@@ -2047,7 +2015,10 @@ func accountToken(account map[string]any) string {
 	if token := stringValue(account["access_token"]); token != "" {
 		return token
 	}
-	return stringValue(account["accessToken"])
+	if token := stringValue(account["accessToken"]); token != "" {
+		return token
+	}
+	return stringValue(account["token"])
 }
 
 func accountPublicRef(account map[string]any) string {
@@ -2236,12 +2207,13 @@ func mapList(value any) []map[string]any {
 	return result
 }
 
+// cloneMap 深拷贝一份 JSON 形状的数据，委托给 store.CloneMap。
+//
+// 本包曾自带一份逐字相同的浅拷贝副本，凡把嵌套容器带出锁再改的调用点
+// （代理组的 nodes、监控记录的 Metrics/Events、去重缓存）都在裸奔。
+// 复制语义只允许有一处实现，所以这里不再保留第二份函数体。
 func cloneMap(input map[string]any) map[string]any {
-	output := make(map[string]any, len(input))
-	for key, value := range input {
-		output[key] = value
-	}
-	return output
+	return store.CloneMap(input)
 }
 
 func stringValue(value any) string {
@@ -2373,4 +2345,18 @@ func isWithin(root, candidate string) bool {
 	candidate, _ = filepath.Abs(candidate)
 	relative, err := filepath.Rel(root, candidate)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+// Shutdown flushes in-memory dirty state to disk during graceful process exit.
+func (s *Server) Shutdown() {
+	if s == nil {
+		return
+	}
+	if s.store != nil {
+		_ = s.store.FlushAccounts()
+		s.store.FlushAuthKeys()
+	}
+	if s.hourlyMetrics != nil {
+		s.hourlyMetrics.Flush()
+	}
 }

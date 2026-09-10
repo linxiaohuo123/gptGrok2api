@@ -1,7 +1,7 @@
 <template>
   <ModalShell
     :open="modal === 'cpa'"
-    max-width="38rem"
+    :aria-label="editingCpaPoolId ? '编辑 CPA 连接' : '新增 CPA 连接'"
     :z-index="130"
     close-on-backdrop
     @close="$emit('close')"
@@ -36,7 +36,7 @@
 
   <ModalShell
     :open="modal === 'sub2api'"
-    max-width="42rem"
+    :aria-label="editingSub2apiId ? '编辑 Sub2API 连接' : '新增 Sub2API 连接'"
     :z-index="130"
     close-on-backdrop
     @close="$emit('close')"
@@ -69,12 +69,6 @@
           <Input v-model.trim="sub2apiForm.group_id" block placeholder="可选" />
         </FormField>
       </div>
-      <div class="rounded-lg border border-border bg-background px-3 py-2.5">
-        <Checkbox v-model="sub2apiForm.verify_tls">验证 TLS 证书</Checkbox>
-        <p v-if="!sub2apiForm.verify_tls" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
-          已关闭证书校验。仅适用于受信任的自签名私有服务。
-        </p>
-      </div>
     </ModalBody>
     <ModalFooter :bordered="false">
       <Button size="sm" variant="outline" :disabled="savingExternalSource === 'sub2api'" @click="$emit('close')">取消</Button>
@@ -86,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { Button, Checkbox, FormField, Input } from 'nanocat-ui'
+import { Button, FormField, Input } from 'nanocat-ui'
 import ModalBody from '@/components/ai/ModalBody.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'

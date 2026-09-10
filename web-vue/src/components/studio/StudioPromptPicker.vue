@@ -1,7 +1,7 @@
 <template>
   <ModalShell
     :open="open"
-    max-width="72rem"
+    aria-label="提示词库"
     :z-index="220"
     panel-class="studio-prompt-picker-modal"
     close-on-backdrop
@@ -14,7 +14,11 @@
       @close="emit('close')"
     />
 
-    <ModalBody density="compact" class="prompt-picker-body">
+    <ModalBody
+      density="compact"
+      class="prompt-picker-body"
+      @scroll.passive="handlePromptScroll"
+    >
       <section class="prompt-picker-filter">
         <FilterToolbar class="prompt-picker-toolbar" :bordered="false" gap="tight" mobile-mode="stack">
           <Input
@@ -56,7 +60,7 @@
         description="优先读取后端本地快照，不等待云端词源。"
       />
 
-      <StateBlock v-else-if="loadError">
+      <StateBlock v-else-if="loadError && prompts.length === 0">
         <EmptyState plain title="提示词加载失败" :description="loadError" />
         <div class="prompt-picker-state-actions">
           <Button size="sm" variant="outline" :disabled="loading" @click="loadPrompts(true)">
@@ -134,7 +138,7 @@ import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
+import { GroupedSelectMenu } from 'nanocat-ui'
 import { usePromptLibraryRuntime } from '@/composables/usePromptLibraryRuntime'
 import { promptCategoryLabel, promptDisplaySummary } from '@/lib/promptLibrary'
 
@@ -190,6 +194,20 @@ function selectPrompt(item: PromptLibraryItem) {
 
 function showAllPrompts() {
   visibleLimit.value = filteredPrompts.value.length
+}
+
+function loadNextPromptPage() {
+  if (!hasMorePrompts.value) return
+  visibleLimit.value = Math.min(
+    filteredPrompts.value.length,
+    visibleLimit.value + PROMPT_PAGE_SIZE,
+  )
+}
+
+function handlePromptScroll(event: Event) {
+  const element = event.currentTarget as HTMLElement | null
+  if (!element || element.scrollHeight - element.scrollTop - element.clientHeight > 240) return
+  loadNextPromptPage()
 }
 
 function ensureLoaded() {

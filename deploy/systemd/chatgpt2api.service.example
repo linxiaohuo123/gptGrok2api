@@ -1,5 +1,5 @@
 [Unit]
-Description=GPTGrok2API local service
+Description=GPT2API local service
 Wants=network-online.target docker.service
 After=network-online.target docker.service
 

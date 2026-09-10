@@ -1,7 +1,7 @@
 <template>
   <ModalShell
     :open="Boolean(file)"
-    max-width="42rem"
+    aria-label="编辑标签"
     :z-index="150"
     close-on-backdrop
     @close="$emit('close')"

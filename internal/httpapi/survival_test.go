@@ -34,10 +34,10 @@ func TestOpenAISurvivalRunUsesRealAccountEndpoints(t *testing.T) {
 	cfg := adminTestConfig(root)
 	cfg.OpenAIBaseURL = upstream.URL
 	cfg.OpenAIOAuthURL = upstream.URL + "/oauth/token"
-	if err := os.MkdirAll(filepath.Dir(cfg.RegisterPath), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.ConfigPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.RegisterPath, []byte(`{"openai_survival":{"enabled":true,"concurrency":1,"refresh_codex_rt":false}}`), 0o600); err != nil {
+	if err := os.WriteFile(cfg.ConfigPath, []byte(`{"openai_survival":{"enabled":true,"concurrency":1,"refresh_codex_rt":false}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	server := New(cfg)
@@ -45,7 +45,7 @@ func TestOpenAISurvivalRunUsesRealAccountEndpoints(t *testing.T) {
 	if _, _, _, err := server.store.AddAccounts(nil, []map[string]any{{"access_token": token, "source_type": "chatgpt_web"}}); err != nil {
 		t.Fatal(err)
 	}
-	response := adminRequest(server.Handler(), http.MethodPost, "/api/register/openai/survival/run", nil)
+	response := adminRequest(server.Handler(), http.MethodPost, "/api/accounts/survival/run", nil)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("survival run returned %d: %s", response.Code, response.Body.String())
 	}

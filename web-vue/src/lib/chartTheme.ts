@@ -2,8 +2,6 @@
  * ECharts 统一主题配置
  * 基于项目的设计系统，提供一致的图表样式
  */
-import { FALLBACK_CHAT_MODELS, FALLBACK_IMAGE_MODELS } from '@/config/modelCatalog'
-
 // 主题色板
 export const chartColors = {
   primary: '#0ea5e9',
@@ -55,22 +53,7 @@ export const modelColors: Record<string, string> = {
   'gpt-4o': modelColorPalette[7],
   'o3': modelColorPalette[9],
   'gpt-image-1': modelColorPalette[8],
-  'grok-4.5': modelColorPalette[9],
-  'grok-4.20-fast': modelColorPalette[3],
-  'grok-4.20-auto': modelColorPalette[4],
-  'grok-4.20-expert': modelColorPalette[5],
-  'grok-4.3-console': modelColorPalette[6],
-  'grok-imagine-image-lite': modelColorPalette[1],
-  'grok-imagine-image': modelColorPalette[2],
-  'grok-imagine-image-pro': modelColorPalette[7],
-  'grok-imagine-image-edit': modelColorPalette[8],
 }
-
-// 有效模型列表
-export const validModels = [
-  ...FALLBACK_CHAT_MODELS,
-  ...FALLBACK_IMAGE_MODELS,
-]
 
 const nonModelKeys = new Set([
   '',
@@ -131,10 +114,9 @@ export function getModelColor(model: string): string {
 // 过滤有效模型
 export function filterValidModels(modelRequests: Record<string, number[]>): Record<string, number[]> {
   const filtered: Record<string, number[]> = {}
-  const allowedModels = new Set(validModels.filter(looksLikeModelLabel))
   Object.entries(modelRequests || {}).forEach(([model, data]) => {
     if (!Array.isArray(data)) return
-    if (allowedModels.has(model) || looksLikeModelLabel(model)) {
+    if (looksLikeModelLabel(model)) {
       filtered[model] = data
     }
   })
@@ -324,7 +306,7 @@ export function getPieChartTheme(isMobile = false) {
  */
 export function createLineSeries(
   name: string,
-  data: number[],
+  data: Array<number | null>,
   color: string,
   options?: {
     smooth?: boolean

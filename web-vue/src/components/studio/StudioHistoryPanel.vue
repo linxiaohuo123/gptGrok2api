@@ -63,7 +63,7 @@
             @click.stop
           >
             <input
-              ref="editInputRef"
+              :ref="setEditInputRef"
               v-model="editingTitle"
               maxlength="80"
               aria-label="对话标题"
@@ -176,6 +176,10 @@ const emptyHistoryTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 let suppressSelect = false
 
 const canDrag = computed(() => !query.value.trim() && !editingId.value && props.conversations.length > 1)
+
+function setEditInputRef(element: Element | null) {
+  editInputRef.value = element instanceof HTMLInputElement ? element : null
+}
 
 const filteredConversations = computed(() => {
   const keyword = query.value.trim().toLowerCase()

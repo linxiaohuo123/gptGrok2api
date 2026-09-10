@@ -129,7 +129,7 @@ func TestImageGroupRemovesNodeAfterThreeConsecutiveRuntimeFailures(t *testing.T)
 	events := []ImageNodeRuntimeResult{}
 	manager.SetImageNodeResultCallback(func(event ImageNodeRuntimeResult) { events = append(events, event) })
 	manager.mu.Lock()
-	manager.imageGroups["images"].nodes[1].cooldownUntil = time.Now().Add(time.Hour)
+	manager.imageGroups["images"].nodes[1].health.cooldownUntil = time.Now().Add(time.Hour)
 	manager.mu.Unlock()
 	for failures := 1; failures <= 3; failures++ {
 		lease := manager.acquireGroup("images")
@@ -139,7 +139,7 @@ func TestImageGroupRemovesNodeAfterThreeConsecutiveRuntimeFailures(t *testing.T)
 		lease.Release(true)
 		manager.mu.Lock()
 		if failures < 3 {
-			manager.imageGroups["images"].nodes[0].cooldownUntil = time.Time{}
+			manager.imageGroups["images"].nodes[0].health.cooldownUntil = time.Time{}
 		}
 		manager.mu.Unlock()
 	}
@@ -276,8 +276,8 @@ func TestImageGroupRevalidatesStableNodeAfterRuntimeFailure(t *testing.T) {
 	manager.mu.Lock()
 	node := manager.imageGroups["images"].nodes[0]
 	manager.mu.Unlock()
-	if node.failures != 0 || node.successes != 11 {
-		t.Fatalf("successful recovery did not restore stable state: failures=%d successes=%d", node.failures, node.successes)
+	if node.health.failures != 0 || node.health.successes != 11 {
+		t.Fatalf("successful recovery did not restore stable state: failures=%d successes=%d", node.health.failures, node.health.successes)
 	}
 }
 
@@ -302,8 +302,8 @@ func TestSuccessfulSlowImageLeaseCoolsWithoutCountingFailure(t *testing.T) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	for _, node := range manager.imageGroups["images"].nodes {
-		if node.id == "fast" && node.failures != 0 {
-			t.Fatalf("slow success incorrectly counted as transport failure: %d", node.failures)
+		if node.id == "fast" && node.health.failures != 0 {
+			t.Fatalf("slow success incorrectly counted as transport failure: %d", node.health.failures)
 		}
 	}
 }

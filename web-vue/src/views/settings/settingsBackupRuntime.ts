@@ -2,6 +2,7 @@ import { ref } from 'vue'
 
 import { settingsApi, type BackupItem, type BackupState, type BackupTestResult } from '@/api/settings'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import { useOperationProgressRuntime } from '@/composables/useOperationProgressRuntime'
 import type { usePageRuntime } from '@/composables/usePageRuntime'
 import { usePageQuery } from '@/composables/usePageQuery'
 import { useToast } from '@/composables/useToast'
@@ -22,6 +23,8 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
   const backupTestResult = ref<BackupTestResult | null>(null)
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
+  const progressRuntime = useOperationProgressRuntime()
+  const operationProgress = progressRuntime.state
 
   const backupsQuery = usePageQuery({
     runtime: options.runtime,
@@ -85,12 +88,18 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
     if (!confirmed) return
 
     backupBusy.value = 'run'
+    await progressRuntime.start({
+      title: '立即备份',
+      subtitle: 'R2 / 备份存储',
+      message: '正在打包并上传运行数据...',
+    })
     try {
       const response = await settingsApi.runBackup()
-      toast.success(`备份已完成：${response.result.key}`)
+      progressRuntime.record({ label: '刷新记录', message: '备份已完成，正在刷新历史...' })
       await loadBackups()
+      progressRuntime.succeed(`备份已完成：${response.result.key}`)
     } catch (error) {
-      toast.error(errorMessage(error, '执行备份失败'))
+      progressRuntime.fail(errorMessage(error, '执行备份失败'))
     } finally {
       backupBusy.value = ''
     }
@@ -106,12 +115,18 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
     if (!confirmed) return
 
     backupBusy.value = item.key
+    await progressRuntime.start({
+      title: '删除备份',
+      subtitle: item.name || item.key,
+      message: '正在删除备份文件...',
+    })
     try {
       await settingsApi.deleteBackup(item.key)
-      toast.success('备份已删除')
+      progressRuntime.record({ label: '刷新记录', message: '备份已删除，正在刷新历史...' })
       await loadBackups()
+      progressRuntime.succeed('备份已删除')
     } catch (error) {
-      toast.error(errorMessage(error, '删除备份失败'))
+      progressRuntime.fail(errorMessage(error, '删除备份失败'))
     } finally {
       backupBusy.value = ''
     }
@@ -129,6 +144,8 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
     backupState,
     backupItems,
     backupTestResult,
+    operationProgress,
+    closeOperationProgress: progressRuntime.close,
     loadBackups,
     testBackupConnection,
     runBackupNow,

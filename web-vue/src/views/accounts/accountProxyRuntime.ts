@@ -1,8 +1,10 @@
 import { computed, ref, type Ref } from 'vue'
 
-import { parseProxyReference, proxyApi, serializeProxyReference, type ProxyGroup, type ProxyTestResult } from '@/api/proxy'
+import type { AccountProxyProjection } from '@/api/accounts'
+import { proxyApi, serializeProxyReference, type ProxyGroup, type ProxyTestResult } from '@/api/proxy'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
+import { proxyTestToastType } from '@/views/proxy/proxyView'
 
 type AccountProxyMode = 'global' | 'direct' | 'group' | 'custom'
 
@@ -24,6 +26,7 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
   const proxyMode = ref<AccountProxyMode>('global')
   const selectedProxyGroupId = ref('')
   const customProxyInput = ref('')
+  const projectedProxyLabel = ref('')
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
 
@@ -43,41 +46,47 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
   })
 
   const accountProxyPreview = computed(() => {
-    const reference = parseProxyReference(options.proxyValue.value)
-    if (reference.mode === 'global') return '使用默认代理'
-    if (reference.mode === 'direct') return '强制直连'
-    if (reference.mode === 'profile') {
-      return `历史兼容引用：profile:${reference.value || '-'}`
+    if (projectedProxyLabel.value) return projectedProxyLabel.value
+    if (proxyMode.value === 'global') return '使用默认出口'
+    if (proxyMode.value === 'direct') return '强制直连'
+    if (proxyMode.value === 'group') {
+      const group = options.proxyGroups.value.find((item) => item.id === selectedProxyGroupId.value)
+      return `代理组：${group?.name || selectedProxyGroupId.value || '-'}`
     }
-    if (reference.mode === 'group') {
-      const group = options.proxyGroups.value.find((item) => item.id === reference.value)
-      return `代理组：${group?.name || reference.value}`
-    }
-    return reference.value
+    return customProxyInput.value || '自定义代理'
   })
 
-  function syncProxyControlsFromValue(value: unknown = options.proxyValue.value) {
-    const reference = parseProxyReference(value)
+  function syncProxyControlsFromProjection(projection?: AccountProxyProjection) {
+    const mode = projection?.proxy_mode || 'inherit'
+    const raw = String(projection?.proxy || '').trim()
+    // Detail responses already populate the editable draft with the real proxy
+    // value. Keep that value when the list projection only contains a safe
+    // placeholder for custom proxy credentials.
+    if (!String(options.proxyValue.value || '').trim() && raw) {
+      options.proxyValue.value = raw
+    }
     customProxyInput.value = ''
     selectedProxyGroupId.value = ''
-    proxyMode.value = reference.mode === 'profile' ? 'custom' : reference.mode
-    if (reference.mode === 'profile') {
-      customProxyInput.value = String(value || '').trim()
+    projectedProxyLabel.value = String(projection?.proxy_label || '').trim()
+    proxyMode.value = mode === 'inherit' ? 'global' : mode
+    if (mode === 'group') {
+      selectedProxyGroupId.value = String(projection?.proxy_group_id || '').trim()
       return
     }
-    if (reference.mode === 'group') {
-      selectedProxyGroupId.value = reference.value
-      return
+    if (mode === 'custom') {
+      customProxyInput.value = raw
     }
-    if (reference.mode === 'custom') {
-      customProxyInput.value = reference.value
-    }
+  }
+
+  function beginProxyDraft() {
+    projectedProxyLabel.value = ''
   }
 
   function setProxyMode(mode: string) {
     const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
       ? mode as AccountProxyMode
       : 'global'
+    beginProxyDraft()
     proxyMode.value = nextMode
     if (nextMode === 'global') {
       options.proxyValue.value = serializeProxyReference('global')
@@ -91,12 +100,14 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
   }
 
   function selectProxyGroup(groupId: string) {
+    beginProxyDraft()
     selectedProxyGroupId.value = groupId.trim()
     proxyMode.value = 'group'
     options.proxyValue.value = serializeProxyReference('group', selectedProxyGroupId.value)
   }
 
   function setCustomProxyInput(value: string) {
+    beginProxyDraft()
     customProxyInput.value = value.trim()
     proxyMode.value = 'custom'
     options.proxyValue.value = serializeProxyReference('custom', customProxyInput.value)
@@ -105,8 +116,7 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
   async function testAccountProxy() {
     if (proxyTesting.value) return
 
-    const reference = parseProxyReference(options.proxyValue.value)
-    if (reference.mode === 'direct') {
+    if (proxyMode.value === 'direct') {
       toast.info('当前账号强制直连，不需要测试代理')
       return
     }
@@ -131,14 +141,15 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
 
     proxyTesting.value = true
     try {
-      const response: { result?: ProxyTestResult | null; results?: Array<{ result: ProxyTestResult }> } = proxyMode.value === 'group'
-        ? await proxyApi.testGroup({ id: selectedProxyGroupId.value })
-        : await proxyApi.test(proxyMode.value === 'custom' ? customProxyInput.value.trim() : '')
-      const result = response.result || response.results?.[0]?.result
-      if (!result) {
-        toast.error('代理测试没有返回结果')
+      if (proxyMode.value === 'group') {
+        const response = await proxyApi.testGroup({ id: selectedProxyGroupId.value })
+        toast[proxyTestToastType(response.summary.tone)](response.summary.message)
         return
       }
+      const response: { result: ProxyTestResult } = await proxyApi.test(
+        proxyMode.value === 'custom' ? customProxyInput.value.trim() : '',
+      )
+      const result = response.result
       if (result.ok) {
         toast.success(`代理可用：${result.latency_ms} ms，HTTP ${result.status}`)
       } else {
@@ -159,7 +170,7 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
     selectedProxyGroupId,
     customProxyInput,
     accountProxyPreview,
-    syncProxyControlsFromValue,
+    syncProxyControlsFromProjection,
     setProxyMode,
     selectProxyGroup,
     setCustomProxyInput,

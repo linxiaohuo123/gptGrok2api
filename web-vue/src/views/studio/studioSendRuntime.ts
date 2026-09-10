@@ -1,8 +1,10 @@
 import { nextTick, type Ref } from 'vue'
+import { editableFileTasksApi } from '@/api/editableFileTasks'
 import { normalizeImageCount } from '@/api/imageTasks'
 import type {
   StudioComposeMode,
   StudioConversation,
+  StudioFileKind,
   StudioImageCompareSource,
   StudioImageForm,
   StudioMessage,
@@ -12,6 +14,7 @@ import type { useToast } from '@/composables/useToast'
 import { createStudioImageTask, runStudioSearchRequest, studioErrorMessage, studioModeRequestErrorFallback, studioModeRetryErrorFallback } from './studioRequestView'
 import type { useStudioChatStreamRuntime } from './studioChatStreamRuntime'
 import type { useStudioComposerRuntime } from './studioComposerRuntime'
+import type { useStudioFileTaskRuntime } from './studioFileTaskRuntime'
 import type { useStudioImageTaskRuntime } from './studioImageTaskRuntime'
 import type { useStudioMessageRuntime } from './studioMessageRuntime'
 import type { useStudioReferenceRuntime } from './studioReferenceRuntime'
@@ -31,10 +34,11 @@ export type StudioSendRuntimeInput = {
   messageRuntime: ReturnType<typeof useStudioMessageRuntime>
   chatStreamRuntime: ReturnType<typeof useStudioChatStreamRuntime>
   imageTaskRuntime: Pick<ReturnType<typeof useStudioImageTaskRuntime>, 'rememberTask' | 'merge' | 'schedulePoll'>
+  fileTaskRuntime: Pick<ReturnType<typeof useStudioFileTaskRuntime>, 'merge' | 'schedulePoll'>
   chatModel: Ref<string>
   chatReasoningEffort: Ref<string>
   imageForm: StudioImageForm
-  toast: Pick<ReturnType<typeof useToast>, 'success'>
+  toast: Pick<ReturnType<typeof useToast>, 'success' | 'error'>
   hooks: StudioSendRuntimeHooks
 }
 
@@ -57,6 +61,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     hooks,
     imageForm,
     imageTaskRuntime,
+    fileTaskRuntime,
     messageRuntime,
     referenceRuntime,
     toast,
@@ -71,9 +76,10 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       return
     }
 
-    const conversation = hooks.ensureConversation(content)
     const mode = composerRuntime.composeMode.value
-    const withReferences = mode === 'image' || mode === 'chat'
+    if (!validateFileRequest(mode)) return
+    const conversation = hooks.ensureConversation(content)
+    const withReferences = mode === 'image' || mode === 'chat' || mode === 'file'
     const files = referenceRuntime.selectedFiles()
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
@@ -84,6 +90,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       mode,
       content,
       status: 'done',
+      fileKind: mode === 'file' ? composerRuntime.fileKind.value : undefined,
       attachments: withReferences && attachments.length ? attachments : undefined,
       referenceImages: buildMessageReferenceImages(referenceImages),
     })
@@ -108,7 +115,8 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
 
     const { conversation, message } = target
     const mode = composerRuntime.composeMode.value
-    const withReferences = mode === 'image' || mode === 'chat'
+    if (!validateFileRequest(mode)) return
+    const withReferences = mode === 'image' || mode === 'chat' || mode === 'file'
     const files = referenceRuntime.selectedFiles()
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
@@ -119,6 +127,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       content,
       status: 'done',
       error: undefined,
+      fileKind: mode === 'file' ? composerRuntime.fileKind.value : undefined,
       attachments: withReferences && attachments.length ? attachments : undefined,
       referenceImages: buildMessageReferenceImages(referenceImages),
     }
@@ -182,11 +191,22 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     hooks.activeConversationId.value = target.conversation.id
     composerRuntime.startEdit(target.message)
     referenceRuntime.clear()
+    if (target.message.mode === 'file' && (target.message.fileKind === 'psd' || target.message.referenceImages?.length)) {
+      toast.error('请重新上传原图后提交文件任务')
+    }
     hooks.scheduleScrollToBottom()
   }
 
   async function resendMessage(message: StudioMessage) {
     if (composerRuntime.isSending.value || chatStreamRuntime.isStreaming.value) return
+    if (message.mode === 'file') {
+      referenceRuntime.clear()
+      if (message.fileKind === 'psd' || message.referenceImages?.length) {
+        fillComposerFromMessage(message)
+        toast.error('请重新上传原图后提交文件任务')
+        return
+      }
+    }
     fillComposerFromMessage(message)
     await nextTick()
     await sendMessage()
@@ -199,6 +219,15 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     const previousUserMessage = messageRuntime.findPreviousUserMessage(target)
     if (!previousUserMessage) return
 
+    if (previousUserMessage.mode === 'file' && (previousUserMessage.fileKind === 'psd' || previousUserMessage.referenceImages?.length)) {
+      referenceRuntime.clear()
+      fillComposerFromMessage(previousUserMessage)
+      toast.error('请重新上传原图后提交文件任务')
+      return
+    }
+
+    if (previousUserMessage.mode === 'file') referenceRuntime.clear()
+
     hooks.activeConversationId.value = target.conversation.id
     messageRuntime.pruneAfterTarget(target)
     hooks.clearConversationNotice(target.conversation.id)
@@ -209,6 +238,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       prompt: previousUserMessage.content,
       files: [],
       requestErrorFallback: studioModeRetryErrorFallback(previousUserMessage.mode),
+      fileKind: previousUserMessage.fileKind,
     })
   }
 
@@ -222,6 +252,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     assistantContent?: string
     inpaintSource?: StudioImageCompareSource
     imageCount?: number
+    fileKind?: StudioFileKind
   }) {
     composerRuntime.setSending(true)
     try {
@@ -229,6 +260,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
         assistantContent: input.assistantContent,
         inpaintSource: input.inpaintSource,
         imageCount: input.imageCount,
+        fileKind: input.fileKind,
       })
       if (success && input.clearReferencesOnSuccess) {
         referenceRuntime.clear()
@@ -260,6 +292,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       assistantContent?: string
       inpaintSource?: StudioImageCompareSource
       imageCount?: number
+      fileKind?: StudioFileKind
     } = {},
   ) {
     if (mode === 'chat') {
@@ -267,6 +300,8 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       return true
     } else if (mode === 'search') {
       return sendSearchMessage(conversation, prompt)
+    } else if (mode === 'file') {
+      return sendFileMessage(conversation, prompt, imageOptions.fileKind || composerRuntime.fileKind.value)
     } else {
       return sendImageMessage(conversation, prompt, files, imageOptions)
     }
@@ -367,6 +402,62 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       hooks.markConversationNotice(conversation.id, 'error')
       return false
     }
+  }
+
+  async function sendFileMessage(
+    conversation: StudioConversation,
+    prompt: string,
+    kind: StudioFileKind,
+  ) {
+    const label = kind === 'psd' ? 'PSD' : 'PPT'
+    const assistantMessage = messageRuntime.addMessage(conversation, {
+      role: 'assistant',
+      mode: 'file',
+      content: `${label} 文件任务已提交`,
+      status: 'queued',
+      fileKind: kind,
+    })
+
+    try {
+      const task = await editableFileTasksApi.create({
+        kind,
+        prompt,
+        base64Images: referenceRuntime.references.value.map((reference) => reference.dataUrl).filter(Boolean),
+      })
+      assistantMessage.fileTaskId = task.id
+      assistantMessage.status = task.status === 'success' ? 'done' : task.status === 'error' ? 'error' : task.status
+      assistantMessage.error = task.status === 'error' ? task.error : undefined
+      hooks.touchConversation(conversation)
+      fileTaskRuntime.merge([task])
+      if (task.status === 'error') {
+        hooks.markConversationNotice(conversation.id, 'error')
+        return false
+      }
+      if (task.status === 'success') {
+        hooks.markConversationNotice(conversation.id, 'done')
+      } else {
+        hooks.markConversationNotice(conversation.id, 'running')
+        fileTaskRuntime.schedulePoll()
+      }
+      toast.success(`${label} 文件任务已提交`)
+      return true
+    } catch (error) {
+      const message = studioErrorMessage(error, '文件任务提交失败')
+      assistantMessage.status = 'error'
+      assistantMessage.content = message
+      assistantMessage.error = message
+      hooks.touchConversation(conversation)
+      hooks.markConversationNotice(conversation.id, 'error')
+      return false
+    }
+  }
+
+  function validateFileRequest(mode: StudioComposeMode) {
+    if (mode !== 'file' || composerRuntime.fileKind.value !== 'psd' || referenceRuntime.references.value.length) {
+      return true
+    }
+    toast.error('PSD 文件任务至少需要上传一张原图')
+    return false
   }
 
   function buildMessageReferenceImages(referenceImages: StudioReferenceImage[]) {

@@ -1,36 +1,63 @@
 ﻿<template>
-  <div class="min-h-screen">
-    <div class="flex min-h-screen flex-col lg:flex-row">
+  <div class="app-shell min-h-screen">
+    <Transition name="route-progress">
       <div
-        v-if="isSidebarOpen"
-        class="fixed inset-0 z-30 bg-black/20 lg:hidden"
-        @click="isSidebarOpen = false"
-      ></div>
-      <aside
-        class="fixed inset-y-0 left-0 z-40 w-64 -translate-x-full overflow-x-hidden bg-card border-r border-border
-               transition-[transform,width] duration-200 ease-out will-change-[transform,width] transform-gpu flex flex-col lg:static lg:translate-x-0 lg:w-[var(--sidebar-width)] lg:bg-card
-               lg:border-b-0 lg:border-r lg:sticky lg:top-0 lg:h-screen"
-        :class="[isSidebarOpen ? 'translate-x-0' : '']"
-        :style="sidebarStyle"
+        v-if="routeProgressPhase !== 'idle'"
+        class="shell-route-progress pointer-events-none fixed inset-x-0 top-0 z-[70] h-0.5 overflow-hidden"
+        role="progressbar"
+        aria-label="页面加载中"
       >
         <div
-          class="flex h-16 items-center pt-4 lg:h-20 lg:pt-5"
-          :class="isSidebarRail ? 'justify-center px-2' : 'justify-between px-6'"
-        >
-          <div class="flex w-full items-center" :class="isSidebarRail ? 'justify-center' : ''">
-            <p v-if="!isSidebarRail" class="ui-section-title">GPTGrok2API</p>
-            <span v-else class="text-sm font-semibold text-foreground" aria-label="GPTGrok2API">GG</span>
+          class="shell-route-progress-bar h-full w-full bg-primary"
+          :class="{ 'shell-route-progress-bar--finishing': routeProgressPhase === 'finishing' }"
+        ></div>
+      </div>
+    </Transition>
+    <div class="flex min-h-screen flex-col lg:flex-row">
+      <div
+        v-if="isSidebarOpen && isMobileViewport"
+        class="fixed inset-0 z-30 bg-black/20 lg:hidden"
+        aria-hidden="true"
+        @click="closeSidebar"
+      ></div>
+      <aside
+        ref="sidebarRef"
+        class="shell-sidebar fixed inset-y-0 left-0 z-40 w-64 -translate-x-full overflow-hidden bg-card border-r border-border
+               transition-[transform,width] duration-200 ease-out will-change-[transform,width] transform-gpu flex flex-col lg:static lg:translate-x-0 lg:w-[var(--sidebar-width)] lg:bg-card
+               lg:border-b-0 lg:border-r lg:sticky lg:top-0 lg:h-screen"
+        :class="[isSidebarOpen ? 'translate-x-0' : '', { 'sidebar--rail': isSidebarRail }]"
+        :style="sidebarStyle"
+        :aria-hidden="isMobileViewport && !isSidebarOpen ? 'true' : undefined"
+        :inert="isMobileViewport && !isSidebarOpen"
+        tabindex="-1"
+        @keydown="handleSidebarKeydown"
+      >
+        <div class="flex h-16 items-center px-5 pt-4 lg:h-20 lg:pt-5">
+          <div class="flex min-w-0 items-center">
+            <a
+              href="https://github.com/yukkcat/chatgpt2api"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="shell-sidebar-brand shrink-0 text-foreground transition-colors hover:text-primary"
+              aria-label="GitHub"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                class="h-6 w-6"
+                fill="currentColor"
+              >
+                <path d="M12 2C6.477 2 2 6.477 2 12c0 4.419 2.865 8.166 6.839 9.489.5.09.682-.217.682-.483 0-.237-.009-.868-.014-1.703-2.782.604-3.369-1.341-3.369-1.341-.454-1.154-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.004.071 1.532 1.031 1.532 1.031.892 1.529 2.341 1.087 2.91.832.091-.647.349-1.087.636-1.337-2.22-.253-4.555-1.11-4.555-4.944 0-1.092.39-1.987 1.029-2.687-.103-.253-.446-1.272.098-2.65 0 0 .84-.269 2.75 1.026A9.564 9.564 0 0 1 12 6.844c.85.004 1.705.115 2.504.337 1.909-1.295 2.748-1.026 2.748-1.026.546 1.378.202 2.397.1 2.65.64.7 1.028 1.595 1.028 2.687 0 3.842-2.338 4.687-4.566 4.936.359.309.678.919.678 1.852 0 1.337-.012 2.418-.012 2.747 0 .268.18.577.688.479A10.002 10.002 0 0 0 22 12c0-5.523-4.477-10-10-10z" />
+              </svg>
+            </a>
+            <div class="sidebar-label sidebar-brand-label">
+              <p class="ui-section-title">ChatGPT2API</p>
+            </div>
           </div>
         </div>
 
-        <nav
-          class="flex-1 pb-3 pt-3 lg:pt-4"
-          :class="isSidebarRail ? 'px-2' : 'px-3'"
-        >
-          <p
-            v-if="!isSidebarRail"
-            class="px-3 pb-2 text-xs uppercase tracking-[0.28em] text-muted-foreground"
-          >
+        <nav id="app-sidebar-navigation" class="sidebar-nav-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2 pt-3 lg:pt-4">
+          <p class="shell-sidebar-section-label sidebar-section-label px-3 text-xs uppercase tracking-[0.28em] text-muted-foreground">
             导航
           </p>
           <div class="space-y-1">
@@ -38,86 +65,79 @@
               v-for="item in visibleMenuItems"
               :key="item.path"
               :to="item.path"
-              class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
+              class="shell-nav-item group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
               :class="navItemClassMap[item.path]"
-              :title="isSidebarRail ? item.label : undefined"
+              :aria-label="item.label"
+              :aria-current="isNavActive(item.path) ? 'page' : undefined"
+              :aria-busy="isNavPending(item.path) ? 'true' : undefined"
               @mouseenter="prefetchRouteView(item.path)"
               @focus="prefetchRouteView(item.path)"
-              @click="handleNavClick"
+              @click="handleNavClick(item.path)"
             >
-              <span
-                class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
-                :class="navIconClassMap[item.path]"
-              >
-                <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
-                  <path :d="item.icon" />
-                </svg>
-              </span>
-              <span v-if="!isSidebarRail" class="flex-1 min-w-0 truncate">{{ item.label }}</span>
-            </RouterLink>
-          </div>
-          <div v-if="visibleUtilityMenuItems.length" class="mt-4 border-t border-border/70 pt-3">
-            <p
-              v-if="!isSidebarRail"
-              class="px-3 pb-2 text-xs uppercase tracking-[0.28em] text-muted-foreground"
-            >
-              工具
-            </p>
-            <div class="space-y-1">
-              <RouterLink
-                v-for="item in visibleUtilityMenuItems"
-                :key="item.path"
-                :to="item.path"
-                class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
-                :class="navItemClassMap[item.path]"
-                :title="isSidebarRail ? item.label : undefined"
-                @mouseenter="prefetchRouteView(item.path)"
-                @focus="prefetchRouteView(item.path)"
-              >
+              <Tooltip v-if="isSidebarRail" :text="item.label" placement="right">
                 <span
-                  class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
+                  class="shell-nav-icon inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
                   :class="navIconClassMap[item.path]"
                 >
                   <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
                     <path :d="item.icon" />
                   </svg>
                 </span>
-                <span v-if="!isSidebarRail" class="flex-1 min-w-0 truncate">{{ item.label }}</span>
-              </RouterLink>
-            </div>
+              </Tooltip>
+              <span
+                v-else
+                class="shell-nav-icon inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
+                :class="navIconClassMap[item.path]"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
+                  <path :d="item.icon" />
+                </svg>
+              </span>
+              <span class="sidebar-label">{{ item.label }}</span>
+            </RouterLink>
           </div>
         </nav>
 
-        <div class="mt-auto border-t border-border py-3" :class="isSidebarRail ? 'px-2' : 'px-6'">
-          <div
-            class="flex items-center gap-3"
-            :class="isSidebarRail ? 'justify-center' : ''"
-          >
+        <div class="shell-sidebar-footer mt-auto border-t border-border px-2 py-3">
+          <div class="sidebar-footer-actions">
             <Button
-              v-if="!isSidebarRail"
               size="sm"
               variant="outline"
-              block
-              root-class="justify-center rounded-2xl text-muted-foreground"
+              :icon-only="isSidebarRail"
+              root-class="sidebar-logout shell-sidebar-footer-button rounded-full text-muted-foreground"
+              aria-label="退出登录"
               @click="handleLogout"
             >
-              退出登录
+              <Tooltip v-if="isSidebarRail" text="退出登录" placement="right">
+                <span class="sidebar-footer-tooltip-trigger">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 17l5-5-5-5" />
+                    <path d="M15 12H3" />
+                    <path d="M21 19V5a2 2 0 0 0-2-2h-6" />
+                  </svg>
+                </span>
+              </Tooltip>
+              <span class="sidebar-label sidebar-logout-label">退出登录</span>
             </Button>
             <Button
               v-if="!isImmersivePage"
-              size="xs"
+              size="sm"
               variant="outline"
               icon-only
-              root-class="shrink-0 rounded-2xl text-muted-foreground"
+              root-class="sidebar-collapse-button shell-sidebar-footer-button shrink-0 rounded-full text-muted-foreground"
               @click="isSidebarCollapsed = !isSidebarCollapsed"
-              :title="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+              :aria-label="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+              :aria-expanded="!isSidebarCollapsed"
+              aria-controls="app-sidebar-navigation"
             >
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                class="h-4 w-4 shrink-0"
-                fill="currentColor"
-              >
+              <Tooltip v-if="isSidebarRail" :text="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'" placement="right">
+                <span class="sidebar-footer-tooltip-trigger">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="currentColor">
+                    <path d="M6 4h2v16H6V4zm4 4h8v2h-8V8zm0 6h8v2h-8v-2z" />
+                  </svg>
+                </span>
+              </Tooltip>
+              <svg v-else aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="currentColor">
                 <path d="M6 4h2v16H6V4zm4 4h8v2h-8V8zm0 6h8v2h-8v-2z" />
               </svg>
             </Button>
@@ -125,26 +145,31 @@
         </div>
       </aside>
 
-      <main class="relative min-w-0 flex-1 overflow-hidden lg:ml-0">
-        <div
-          v-if="isRoutePending"
-          class="route-pending-bar"
-          role="status"
-          :aria-label="routePendingText"
-        ></div>
-
+      <main
+        class="relative min-w-0 flex-1 bg-card lg:ml-0"
+        :class="[
+          { 'flex h-dvh min-h-0 flex-col overflow-hidden': isWorkspacePage },
+          { 'lg:flex lg:h-dvh lg:min-h-0 lg:flex-col lg:overflow-hidden': isContainedManagementPage },
+        ]"
+        :aria-hidden="isMobileSidebarActive ? 'true' : undefined"
+        :inert="isMobileSidebarActive"
+      >
         <header
           v-if="!isImmersivePage"
-          class="min-w-0 flex flex-col gap-4 border-b border-border bg-card px-6 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-10"
+          class="shell-header min-w-0 flex h-14 items-center gap-2.5 border-b border-border bg-card px-4 sm:px-6 lg:h-16"
+          :class="{ 'shrink-0': usesViewportLayout }"
         >
-          <div class="flex items-center gap-3">
+          <div class="flex min-w-0 flex-1 items-center gap-2.5">
             <Button
+              ref="sidebarToggleRef"
               size="xs"
               variant="outline"
               icon-only
               root-class="lg:hidden"
-              @click="isSidebarOpen = true"
+              @click="openSidebar"
               aria-label="打开导航"
+              :aria-expanded="isMobileViewport && isSidebarOpen"
+              aria-controls="app-sidebar-navigation"
             >
               <svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor">
                 <path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z" />
@@ -153,7 +178,7 @@
             <svg
               aria-hidden="true"
               viewBox="0 0 130 150"
-              class="logo-mark h-9 w-9 shrink-0 text-foreground"
+              class="logo-mark hidden h-9 w-9 shrink-0 text-foreground sm:block"
             >
               <defs>
                 <filter id="head-shadow" x="-50%" y="-50%" width="200%" height="200%">
@@ -178,81 +203,130 @@
                 <rect class="logo-eye" x="81" y="68" width="14" height="4" rx="1" />
               </g>
             </svg>
-            <div class="flex min-w-0 flex-wrap items-center gap-2">
-              <h2 class="text-xl font-semibold text-foreground lg:text-2xl">
+            <div class="min-w-0">
+              <h2 class="truncate text-base font-semibold text-foreground sm:text-lg lg:text-xl">
                 {{ currentPageTitle }}
               </h2>
             </div>
           </div>
-          <div class="flex flex-wrap items-center gap-3">
-            <Button
-              size="sm"
-              variant="outline"
-              @click="cycleThemeMode"
-              :title="themeButtonTitle"
-            >
-              {{ themeButtonText }}
-            </Button>
-            <Button
-              v-if="canvasHref"
-              size="sm"
-              variant="outline"
-              @click="openInfiniteCanvas"
-              title="打开外部无限画布"
-            >
-              画布
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              @click="refreshPage"
-              title="刷新"
-            >
-              刷新
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              v-if="authStore.isAdmin"
-              @click="openUpdateDialog"
-              :title="versionButtonTitle"
-            >
-              <span class="inline-flex items-center gap-1.5">
-                <span
-                  v-if="versionIndicatorVisible"
-                  class="h-2 w-2 shrink-0 rounded-full"
-                  :class="versionIndicatorClass"
-                  aria-hidden="true"
-                />
-                <span>{{ versionButtonText }}</span>
-                <span v-if="versionIndicatorVisible" class="sr-only">，{{ versionIndicatorLabel }}</span>
+          <div class="ml-auto flex shrink-0 items-center gap-[12px]">
+            <div class="flex items-center gap-[8px]">
+              <Tooltip :text="themeButtonTitle" placement="bottom">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  :aria-label="themeButtonTitle"
+                  @click="cycleThemeMode"
+                >
+                  {{ themeButtonText }}
+                </Button>
+              </Tooltip>
+              <span v-if="canvasHref" class="hidden lg:inline-flex">
+                <Tooltip text="打开无限画布" placement="bottom">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    aria-label="打开无限画布"
+                    @click="openInfiniteCanvas"
+                  >
+                    画布
+                  </Button>
+                </Tooltip>
               </span>
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              v-if="authStore.isAdmin"
-              @click="openApiInfo"
-            >
-              接口信息
-            </Button>
+              <Tooltip text="刷新当前页面" placement="bottom">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label="刷新当前页面"
+                  @click="refreshPage"
+                >
+                  刷新
+                </Button>
+              </Tooltip>
+            </div>
+            <div class="flex items-center gap-[8px]">
+              <span v-if="authStore.isAdmin" class="hidden lg:inline-flex">
+                <Tooltip text="查看接口信息" placement="bottom">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    aria-label="查看接口信息"
+                    @click="openApiInfo"
+                  >
+                    接口
+                  </Button>
+                </Tooltip>
+              </span>
+              <span class="hidden lg:inline-flex">
+                <Tooltip text="交流与服务" placement="bottom">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    aria-label="交流与服务"
+                    @click="isServiceDialogOpen = true"
+                  >
+                    服务
+                  </Button>
+                </Tooltip>
+              </span>
+              <span v-if="authStore.isAdmin" class="hidden lg:inline-flex">
+                <Tooltip :text="`查看版本更新，当前 ${currentVersionLabel || '版本未知'}`" placement="bottom">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    :root-class="hasNewVersion
+                      ? '!border-amber-400/70 !bg-amber-50 !text-amber-800 hover:!border-amber-500 hover:!bg-amber-100 hover:!text-amber-900 dark:!border-amber-500/60 dark:!bg-amber-950/35 dark:!text-amber-300 dark:hover:!border-amber-400 dark:hover:!bg-amber-950/55 dark:hover:!text-amber-200'
+                      : ''"
+                    aria-label="查看版本更新"
+                    @click="openUpdateDialog"
+                  >
+                    {{ currentVersionLabel || '版本' }}
+                  </Button>
+                </Tooltip>
+              </span>
+              <span v-if="mobileHeaderMenuItems.length" class="inline-flex lg:hidden">
+                <ActionMenu
+                  label="更多"
+                  :items="mobileHeaderMenuItems"
+                  size="sm"
+                  placement="bottom"
+                  align="right"
+                  trigger-class="shell-header-more"
+                  content-class="min-w-36"
+                  @select="handleHeaderMenuSelect"
+                />
+              </span>
+            </div>
           </div>
         </header>
 
         <div
-          class="relative h-full overflow-y-auto overflow-x-hidden bg-card"
-          :class="isImmersivePage ? 'p-0' : 'px-4 pb-10 pt-6 lg:px-10 lg:pt-10'"
+          class="relative min-w-0 overflow-x-hidden bg-card"
+          :class="[
+            isWorkspacePage ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : '',
+            isContainedManagementPage ? 'lg:flex lg:min-h-0 lg:flex-1 lg:flex-col lg:overflow-hidden' : '',
+            isImmersivePage ? 'p-0' : 'px-4 py-6 sm:px-6',
+          ]"
         >
           <RouterView v-slot="{ Component, route: currentRoute }">
             <Suspense :timeout="120">
               <template #default>
-                <div class="route-view-content" :class="{ 'h-full': isImmersivePage }">
-                  <KeepAlive :include="cachedRouteNames" :max="cachedRouteMax">
-                    <component
-                      :is="Component"
-                      :key="String(currentRoute.name || currentRoute.path)"
-                    />
-                  </KeepAlive>
+                <div
+                  class="route-view-content"
+                  :class="[
+                    isWorkspacePage ? 'flex min-h-0 flex-1 flex-col' : '',
+                    isContainedManagementPage ? 'lg:flex lg:min-h-0 lg:flex-1 lg:flex-col' : '',
+                    { 'h-full': isImmersivePage },
+                  ]"
+                >
+                  <Transition name="route-view">
+                    <KeepAlive :include="cachedRouteNames" :max="cachedRouteMax">
+                      <component
+                        :is="Component"
+                        :key="String(currentRoute.name || currentRoute.path)"
+                      />
+                    </KeepAlive>
+                  </Transition>
                 </div>
               </template>
               <template #fallback>
@@ -260,7 +334,6 @@
                   :title="routePendingText"
                   description="正在准备页面内容..."
                   compact
-                  dashed
                 />
               </template>
             </Suspense>
@@ -278,8 +351,45 @@
       @cancel="confirmDialog.cancel"
     />
     <ModalShell
+      :open="isServiceDialogOpen"
+      max-width="min(22rem, calc(100vw - 24px))"
+      :z-index="100"
+      panel-class="w-full p-5"
+      close-on-backdrop
+      aria-label="交流与服务"
+      @close="isServiceDialogOpen = false"
+    >
+      <ModalHeader
+        title="交流与服务"
+        title-class="ui-subsection-title"
+        :bordered="false"
+        flush
+        @close="isServiceDialogOpen = false"
+      />
+
+      <div class="mt-4 grid gap-2">
+        <a
+          v-for="item in headerServiceItems"
+          :key="item.key"
+          :href="item.href"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="shell-service-link group flex min-w-0 items-center gap-3 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-[hsl(var(--foreground)_/_0.24)] hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          @click="isServiceDialogOpen = false"
+        >
+          <span class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors group-hover:text-foreground">
+            <Icon :icon="item.icon" class="h-4 w-4" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-medium text-foreground">{{ item.label }}</span>
+            <span v-if="item.detail" class="mt-0.5 block text-xs leading-5 text-muted-foreground">{{ item.detail }}</span>
+          </span>
+          <Icon icon="lucide:external-link" class="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
+        </a>
+      </div>
+    </ModalShell>
+    <ModalShell
       :open="isApiInfoOpen"
-      max-width="32rem"
       :z-index="100"
       panel-class="p-6"
       close-on-backdrop
@@ -332,27 +442,6 @@
                   variant="outline"
                   root-class="shrink-0 text-[11px] text-muted-foreground"
                   @click="copyText(apiSdkUrl)"
-                >
-                  复制
-                </Button>
-              </div>
-            </div>
-            <div>
-              <p class="text-xs text-muted-foreground">完整接口</p>
-              <div class="mt-1 flex items-start gap-2">
-                <ValueSurface
-                  tag="p"
-                  mono
-                  break-mode="all"
-                  root-class="min-w-0 flex-1"
-                >
-                  {{ apiFullUrl }}
-                </ValueSurface>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  root-class="shrink-0 text-[11px] text-muted-foreground"
-                  @click="copyText(apiFullUrl)"
                 >
                   复制
                 </Button>
@@ -427,11 +516,10 @@
     </ModalShell>
     <ModalShell
       :open="isUpdateDialogOpen"
-      max-width="42rem"
       :z-index="100"
-      panel-class="p-6"
+      panel-class="flex min-h-0 max-h-[80dvh] flex-col overflow-hidden p-6"
       close-on-backdrop
-      @close="isUpdateDialogOpen = false"
+      @close="closeUpdateDialog"
     >
       <ModalHeader
         title="版本更新"
@@ -439,7 +527,7 @@
         title-class="ui-subsection-title"
         :bordered="false"
         flush
-        @close="isUpdateDialogOpen = false"
+        @close="closeUpdateDialog"
       />
 
       <div class="mt-4 grid gap-3 sm:grid-cols-2">
@@ -459,7 +547,12 @@
               {{ isCheckingUpdate ? '检查中...' : '检查更新' }}
             </button>
           </div>
-          <p class="mt-1 text-base font-semibold text-foreground">{{ latestVersionLabel }}</p>
+          <p
+            class="mt-1 text-base font-semibold"
+            :class="hasNewVersion ? 'text-amber-800 dark:text-amber-300' : 'text-foreground'"
+          >
+            {{ latestVersionLabel }}
+          </p>
         </div>
       </div>
 
@@ -479,7 +572,7 @@
         </MetaChip>
       </div>
 
-      <div class="mt-5 max-h-[56vh] space-y-5 overflow-y-auto pr-1">
+      <div class="scrollbar-slim mt-5 min-h-0 flex-1 space-y-5 overflow-y-auto pr-2">
         <div
           v-for="release in releaseEntries"
           :key="`${release.version}-${release.date}`"
@@ -520,7 +613,18 @@
               >
                 {{ item.type }}
               </MetaChip>
-              <span class="min-w-0 flex-1 text-foreground/85">{{ item.content }}</span>
+              <span class="min-w-0 flex-1 text-foreground/85">
+                <template
+                  v-for="(segment, segmentIndex) in splitReleaseInlineCode(item.content)"
+                  :key="`${release.version}-${index}-${segmentIndex}`"
+                >
+                  <code
+                    v-if="segment.kind === 'code'"
+                    class="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em] text-foreground"
+                  >{{ segment.content }}</code>
+                  <span v-else>{{ segment.content }}</span>
+                </template>
+              </span>
             </div>
           </div>
         </div>
@@ -535,68 +639,122 @@
           variant="outline"
           @click="openReleasePage"
         >
-          打开 GitHub
+          打开发布页
         </Button>
         <Button
           size="xs"
           variant="primary"
           root-class="min-w-14 justify-center"
-          @click="isUpdateDialogOpen = false"
+          @click="closeUpdateDialog"
         >
           知道了
         </Button>
+        <Button
+          v-if="canStartUpdate"
+          size="xs"
+          variant="primary"
+          :disabled="updateProgressState.busy || isUpdateConfirming"
+          @click="startUpdate"
+        >
+          {{ isUpdateConfirming ? '等待确认' : '立即更新' }}
+        </Button>
       </ModalFooter>
     </ModalShell>
+
+    <OperationProgressDrawer
+      v-if="updateProgressState.open"
+      :open="updateProgressState.open"
+      :title="updateProgressState.title"
+      :subtitle="updateProgressState.subtitle"
+      :total="updateProgressState.total"
+      :current="updateProgressState.current"
+      :status-label="updateProgressState.statusLabel"
+      :error="updateProgressState.error"
+      :busy="updateProgressState.busy"
+      :close-disabled="updateProgressState.busy"
+      :tone="updateProgressState.tone"
+      :events="updateProgressState.events"
+      :summary-items="updateProgressSummary"
+      @close="closeUpdateProgress"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Icon } from '@iconify/vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { settingsApi } from '@/api/settings'
+import {
+  PUBLIC_SETTINGS_CHANGED_EVENT,
+} from '@/api/settings'
 import { versionApi } from '@/api/version'
 import { getAuthToken } from '@/api/client'
-import { useSettingsStore } from '@/stores/settings'
+import type { AuthCapability } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
-import { projectRepositoryUrl } from '@/config/project'
 import { useModelCatalog } from '@/composables/useModelCatalog'
-import { Button, ValueSurface } from 'nanocat-ui'
+import { usePublicRuntimeConfig } from '@/composables/usePublicRuntimeConfig'
+import { useListLayoutPreference } from '@/composables/useListLayoutPreference'
+import { useOperationProgressRuntime } from '@/composables/useOperationProgressRuntime'
+import { ActionMenu, Button, Tooltip, ValueSurface, type ActionMenuItem } from 'nanocat-ui'
 import ConfirmDialog from '@/components/ui/AppConfirmDialog.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
+import OperationProgressDrawer from '@/components/ai/OperationProgressDrawer.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
-import { getBooleanPreference, preferenceKeys, setBooleanPreference } from '@/lib/preferences'
+import {
+  getBooleanPreference,
+  getStringPreference,
+  preferenceKeys,
+  removePreference,
+  setBooleanPreference,
+  setStringPreference,
+} from '@/lib/preferences'
+import { writeClipboardText } from '@/lib/clipboard'
+import { focusFirstWithin, focusRefTarget, trapFocusWithin } from '@/lib/focusLoop'
 import { applyThemeMode, getStoredThemeMode, setStoredThemeMode, type ThemeMode } from '@/lib/theme'
-import { isNewerVersion, normalizeVersionTag, parseChangelog, type ReleaseInfo } from '@/lib/release'
-import type { Settings } from '@/types/api'
+import {
+  normalizeVersionTag,
+  parseChangelog,
+  splitReleaseInlineCode,
+  type ReleaseInfo,
+} from '@/lib/release'
+import type { UpdateTaskResponse, VersionCheckResponse } from '@/types/api'
 import localVersion from '../../../VERSION?raw'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
-const settingsStore = useSettingsStore()
 const toast = useToast()
 const isSidebarOpen = ref(false)
 const isSidebarCollapsed = ref(false)
+const isMobileViewport = ref(typeof window !== 'undefined'
+  ? !window.matchMedia('(min-width: 1024px)').matches
+  : false)
+const sidebarToggleRef = ref<ComponentPublicInstance | null>(null)
+const sidebarRef = ref<HTMLElement | null>(null)
 const confirmDialog = useConfirmDialog()
 const isApiInfoOpen = ref(false)
+const isServiceDialogOpen = ref(false)
 const isUpdateDialogOpen = ref(false)
 const isCheckingUpdate = ref(false)
-const bundledVersionTag = normalizeVersionTag(localVersion)
-const currentVersionTag = ref(bundledVersionTag)
-const latestVersionTag = ref('')
+const isUpdateConfirming = ref(false)
+const currentVersionTag = ref(normalizeVersionTag(localVersion))
+const updateStatus = ref<VersionCheckResponse | null>(null)
+const updateRequestError = ref('')
+const updateTargetTag = ref('')
+const updateProgressRuntime = useOperationProgressRuntime()
+const updateProgressState = updateProgressRuntime.state
 const releaseEntries = ref<ReleaseInfo[]>([])
-const updateCheckMessage = ref('')
 const currentAuthToken = ref('')
-const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
-const isRoutePending = ref(false)
-const pendingRouteTitle = ref('')
-const cachedRouteNames = ['Studio', 'Accounts', 'Logs', 'Monitor', 'Gallery', 'Proxy', 'Register', 'ICloud', 'Settings']
+type RouteProgressPhase = 'idle' | 'running' | 'finishing'
+const pendingNavigationPath = ref('')
+const routeProgressPhase = ref<RouteProgressPhase>('idle')
+const cachedRouteNames = ['Dashboard', 'Studio', 'Accounts', 'Logs', 'Monitor', 'Gallery', 'Proxy', 'Settings']
 const cachedRouteMax = cachedRouteNames.length
 const themeOptions: { label: string; value: ThemeMode }[] = [
   { label: '浅色', value: 'light' },
@@ -607,66 +765,68 @@ const {
   chatModels: supportedChatModels,
   imageModels: supportedImageModels,
   loadModelCatalog,
-} = useModelCatalog(() => settingsStore.settings)
+} = useModelCatalog()
+const {
+  apiBaseUrl,
+  thirdPartyApps,
+  loadPublicRuntimeConfig,
+} = usePublicRuntimeConfig()
 
-const menuItems = [
+type NavigationItem = {
+  path: string
+  label: string
+  icon: string
+  capability: AuthCapability
+}
+
+const menuItems: NavigationItem[] = [
   {
     path: '/',
     label: '概览中心',
     icon: 'M4 4h7v7H4V4zm9 0h7v4h-7V4zm0 6h7v10h-7V10zM4 13h7v7H4v-7z',
+    capability: 'admin_console',
   },
   {
     path: '/monitor',
     label: '实时监控',
     icon: 'M4 5h3v14H4V5zm5 6h3v8H9v-8zm5-4h3v12h-3V7zm5 7h3v5h-3v-5z',
+    capability: 'admin_console',
   },
   {
     path: '/studio',
     label: '对话画图',
     icon: 'M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-5l-4 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 3v6h12V7H6zm2 2 2.1 2.8 2.4-3.1L17 14H7l1-5z',
+    capability: 'studio',
   },
   {
     path: '/accounts',
     label: '账号管理',
     icon: 'M12 12a3.5 3.5 0 1 0-3.5-3.5A3.5 3.5 0 0 0 12 12zm0 2c-4.1 0-7.5 2.2-7.5 5v1h15v-1c0-2.8-3.4-5-7.5-5z',
-  },
-  {
-    path: '/register',
-    label: '注册账号',
-    icon: 'M7 3h10a2 2 0 0 1 2 2v3h-2V5H7v14h10v-3h2v3a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm8.6 5.4L20.2 13l-4.6 4.6-1.4-1.4 2.2-2.2H9v-2h7.4l-2.2-2.2 1.4-1.4z',
-  },
-  {
-    path: '/icloud',
-    label: 'iCloud 邮箱',
-    icon: 'M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9zm8 1.8L6.2 6.1 4.9 6.8 12 10.9l7.1-4.1-1.3-.7L12 9.3zm-6 1.8v4.2l5 2.8v-4.2l-5-2.8zm7 2.8v4.2l5-2.8v-4.2l-5 2.8z',
+    capability: 'admin_console',
   },
   {
     path: '/logs',
     label: '日志管理',
     icon: 'M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h10v2H4v-2z',
+    capability: 'admin_console',
   },
   {
     path: '/gallery',
     label: '图片管理',
     icon: 'M22 16V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2zm-11-4 2.03 2.71L16 11l4 5H8l3-3zM2 6v14a2 2 0 0 0 2 2h14v-2H4V6H2z',
+    capability: 'admin_console',
   },
   {
     path: '/proxy',
     label: '代理管理',
     icon: 'M12 3a5 5 0 0 1 5 5v2h1a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3h1V8a5 5 0 0 1 5-5zm-3 7h6V8a3 3 0 0 0-6 0v2zm-3 2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H6z',
+    capability: 'admin_console',
   },
   {
     path: '/settings',
     label: '系统设置',
     icon: 'M4 6h10v2H4V6zm12 0h4v2h-4V6zM4 11h6v2H4v-2zm8 0h8v2h-8v-2zM4 16h10v2H4v-2zm12 0h4v2h-4v-2z',
-  },
-]
-
-const utilityMenuItems = [
-  {
-    path: '/debug',
-    label: '调试中心',
-    icon: 'M5 4h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-5l-4 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 3v2h8V7H6zm0 4v2h5v-2H6zm11-4h-2v2h2V7zm0 4h-2v2h2v-2z',
+    capability: 'admin_console',
   },
 ]
 
@@ -676,48 +836,41 @@ const routeTitleMap: Record<string, string> = {
   logs: '日志管理',
   gallery: '图片管理',
   proxy: '代理管理',
-  register: '注册账号',
-  icloud: 'iCloud 邮箱',
   settings: '系统设置',
-  debug: '调试中心',
   monitor: '实时监控',
-  docs: '文档教程',
   studio: '对话画图',
 }
 
 const visibleMenuItems = computed(() => {
-  if (authStore.isUser) {
-    return menuItems.filter(item => item.path === '/studio')
-  }
-  return menuItems
+  return menuItems.filter(item => authStore.hasCapability(item.capability))
 })
-
-const visibleUtilityMenuItems = computed(() => (authStore.isAdmin ? utilityMenuItems : []))
 
 const currentPageTitle = computed(() => {
   const routeName = String(route.name || '')
-  const item = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].find(item => isNavActive(item.path))
+  const item = visibleMenuItems.value.find(item => isNavActive(item.path))
   return item?.label || routeTitleMap[routeName] || '概览中心'
 })
 
-function titleForRoute(name: unknown, path: string) {
-  const routeName = String(name || '')
-  const item = [...menuItems, ...utilityMenuItems].find((menuItem) => menuItem.path === path)
-  return item?.label || routeTitleMap[routeName] || '页面'
-}
-
 const isImmersivePage = computed(() => Boolean(route.meta.immersive))
-const isSidebarRail = computed(() => isSidebarCollapsed.value || isImmersivePage.value)
+const isWorkspacePage = computed(() => Boolean(route.meta.workspace))
+const isManagementPage = computed(() => Boolean(route.meta.management))
+const { isWorkspaceLayout } = useListLayoutPreference()
+const isContainedManagementPage = computed(() => isManagementPage.value && isWorkspaceLayout.value)
+const usesViewportLayout = computed(() => isWorkspacePage.value || isContainedManagementPage.value)
+const isMobileSidebarActive = computed(() => isMobileViewport.value && isSidebarOpen.value)
+const isSidebarRail = computed(() => (
+  !isMobileViewport.value && (isSidebarCollapsed.value || isImmersivePage.value)
+))
 const sidebarStyle = computed(() => ({
   '--sidebar-width': isSidebarRail.value ? '4rem' : '16rem',
 }))
 
-const navItemBaseClass = computed(() => isSidebarRail.value ? 'px-2 justify-center gap-0' : 'px-2.5 gap-3')
+const navItemBaseClass = 'justify-start gap-0 px-1.5'
 const activeNavPathSet = computed(() => {
   const name = String(route.name || '')
   const currentPath = route.path
   return new Set(
-    [...visibleMenuItems.value, ...visibleUtilityMenuItems.value]
+    visibleMenuItems.value
       .filter((item) => isRoutePathActive(item.path, name, currentPath))
       .map((item) => item.path),
   )
@@ -733,85 +886,83 @@ const isNavActive = (path: string) => {
   return activeNavPathSet.value.has(path)
 }
 
+function isNavPending(path: string) {
+  return Boolean(pendingNavigationPath.value)
+    && normalizedRoutePath(path) === pendingNavigationPath.value
+}
+
+function isNavVisuallyActive(path: string) {
+  if (pendingNavigationPath.value) return isNavPending(path)
+  return isNavActive(path)
+}
+
 function buildNavItemClass(path: string) {
-  const base = navItemBaseClass.value
-  if (isNavActive(path)) {
+  const base = navItemBaseClass
+  if (isNavVisuallyActive(path)) {
     return `${base} rounded-[0.9rem] border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--primary)_/_0.08)] font-semibold text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)_/_0.08)]`
   }
   return `${base} rounded-[0.9rem] border-transparent text-muted-foreground hover:border-border hover:bg-[hsl(var(--secondary)_/_0.55)] hover:text-foreground`
 }
 
 function buildNavIconClass(path: string) {
-  if (isNavActive(path)) {
+  if (isNavVisuallyActive(path)) {
     return 'border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--card))] text-foreground shadow-sm'
   }
   return 'border-border bg-[hsl(var(--card))] text-muted-foreground group-hover:border-[hsl(var(--foreground)_/_0.28)] group-hover:text-foreground'
 }
 
 const navItemClassMap = computed<Record<string, string>>(() => {
-  const entries = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].map((item) => [item.path, buildNavItemClass(item.path)])
+  const entries = visibleMenuItems.value.map((item) => [item.path, buildNavItemClass(item.path)])
   return Object.fromEntries(entries)
 })
 
 const navIconClassMap = computed<Record<string, string>>(() => {
-  const entries = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].map((item) => [item.path, buildNavIconClass(item.path)])
+  const entries = visibleMenuItems.value.map((item) => [item.path, buildNavIconClass(item.path)])
   return Object.fromEntries(entries)
 })
 
 
-const apiBaseUrl = computed(() => {
-  const raw = settingsStore.settings?.basic?.base_url
-    || import.meta.env.VITE_API_URL
-    || window.location.origin
-  return raw.replace(/\/$/, '')
-})
-
 const apiSdkUrl = computed(() => `${apiBaseUrl.value}/v1`)
-const apiFullUrl = computed(() => `${apiBaseUrl.value}/v1/chat/completions`)
 const apiKeyDisplay = computed(() => currentAuthToken.value || '未登录')
-const currentVersionLabel = computed(() => normalizeVersionTag(currentVersionTag.value || ''))
-const latestVersionLabel = computed(() => normalizeVersionTag(latestVersionTag.value || releaseEntries.value[0]?.version || currentVersionTag.value || ''))
-const versionButtonText = computed(() => currentVersionLabel.value || '版本')
-const hasNewVersion = computed(() => isNewerVersion(latestVersionLabel.value, currentVersionLabel.value))
-const updateCheckStatus = computed(() => {
-  if (isCheckingUpdate.value) return 'checking'
-  if (!updateCheckMessage.value) return 'idle'
-  if (updateCheckMessage.value.includes('失败')) return 'error'
-  if (hasNewVersion.value || updateCheckMessage.value.includes('发现新版本')) return 'available'
-  return 'current'
-})
-const versionIndicatorVisible = computed(() => ['available', 'current'].includes(updateCheckStatus.value))
-const versionIndicatorClass = computed(() => {
-  if (updateCheckStatus.value === 'available') {
-    return 'bg-amber-400 ring-2 ring-amber-400/20 motion-safe:animate-pulse'
-  }
-  return 'bg-emerald-500 ring-2 ring-emerald-500/15'
-})
-const versionIndicatorLabel = computed(() => (
-  updateCheckStatus.value === 'available' ? '有新版本' : '已是最新版'
+const currentVersionLabel = computed(() => normalizeVersionTag(
+  updateStatus.value?.current_tag || currentVersionTag.value || '',
 ))
-const versionButtonTitle = computed(() => {
-  if (updateCheckStatus.value === 'checking') return '正在检查版本更新'
-  if (updateCheckStatus.value === 'error') return '版本检查失败，点击重试'
-  if (versionIndicatorVisible.value) return `查看版本更新：${versionIndicatorLabel.value}`
-  return '查看版本更新'
+const latestVersionLabel = computed(() => normalizeVersionTag(
+  updateStatus.value?.latest_tag || currentVersionTag.value || '',
+))
+const hasNewVersion = computed(() => updateStatus.value?.update_available === true)
+const canStartUpdate = computed(() => updateStatus.value?.can_update === true && !updateProgressState.busy)
+const updateProgressSummary = computed(() => [
+  {
+    key: 'current-version',
+    label: '当前版本',
+    value: currentVersionLabel.value || '未知',
+  },
+  {
+    key: 'target-version',
+    label: '目标版本',
+    value: updateTargetTag.value || latestVersionLabel.value || '未知',
+  },
+])
+const updateCheckMessage = computed(() => {
+  if (isCheckingUpdate.value) return updateCheckingMessage
+  return updateRequestError.value || updateStatus.value?.status_message || ''
 })
 const updateCheckMessageClass = computed(() => {
-  if (updateCheckStatus.value === 'available') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700'
-  if (updateCheckStatus.value === 'checking') return 'border-cyan-500/35 bg-cyan-500/10 text-cyan-700'
-  if (updateCheckStatus.value === 'error') return 'border-amber-500/40 bg-amber-500/10 text-amber-700'
+  if (isCheckingUpdate.value) return 'border-cyan-500/35 bg-cyan-500/10 text-cyan-700'
+  if (updateRequestError.value || updateStatus.value?.tone === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-700'
+  if (updateStatus.value?.tone === 'success') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700'
   return 'border-border bg-muted/40 text-muted-foreground'
 })
 const updateCheckBadgeText = computed(() => {
-  if (updateCheckStatus.value === 'available') return '可更新'
-  if (updateCheckStatus.value === 'checking') return '检查中'
-  if (updateCheckStatus.value === 'error') return '检查失败'
-  return '已是最新'
+  if (isCheckingUpdate.value) return '检查中'
+  if (updateRequestError.value) return '请求失败'
+  return updateStatus.value?.status_label || '未检查'
 })
 const updateCheckBadgeTone = computed(() => {
-  if (updateCheckStatus.value === 'available') return 'success'
-  if (updateCheckStatus.value === 'checking') return 'info'
-  if (updateCheckStatus.value === 'error') return 'warning'
+  if (isCheckingUpdate.value) return 'info'
+  if (updateRequestError.value || updateStatus.value?.tone === 'warning') return 'warning'
+  if (updateStatus.value?.tone === 'success') return 'success'
   return 'muted'
 })
 function releaseItemTone(type: string): 'default' | 'muted' | 'success' | 'warning' | 'danger' | 'info' {
@@ -822,30 +973,70 @@ function releaseItemTone(type: string): 'default' | 'muted' | 'success' | 'warni
   if (['移除', '删除', '废弃', 'Removed', 'Deprecated'].includes(value)) return 'danger'
   return 'muted'
 }
-const activeThirdPartyApps = computed(() => settingsStore.settings?.third_party_apps || thirdPartyApps.value)
 const canvasHref = computed(() => {
-  const canvas = activeThirdPartyApps.value?.infinite_canvas
+  const canvas = thirdPartyApps.value?.infinite_canvas
   const token = getAuthToken()
   if (!canvas?.enabled || !canvas.url.trim() || !token) return ''
   return buildThirdPartyHref(canvas.url, apiBaseUrl.value, token)
 })
 const themeButtonText = computed(() => themeOptions.find(option => option.value === themeMode.value)?.label || '系统')
 const themeButtonTitle = computed(() => `当前主题：${themeButtonText.value}，点击切换`)
-const routePendingText = computed(() => `正在打开${pendingRouteTitle.value || currentPageTitle.value}`)
-let systemThemeMedia: MediaQueryList | null = null
-let routePendingTimer: number | null = null
-let stopRoutePendingBeforeEach: (() => void) | null = null
-let stopRoutePendingAfterEach: (() => void) | null = null
-let stopRoutePendingError: (() => void) | null = null
-const prefetchedRoutePaths = new Set<string>()
-const releasePageUrl = ref(projectRepositoryUrl)
-const updateCheckingMessage = '正在从 GitHub 检查版本...'
-
-function currentVersionCandidate(value: string) {
-  const apiVersionTag = normalizeVersionTag(value)
-  if (!apiVersionTag) return bundledVersionTag
-  return isNewerVersion(bundledVersionTag, apiVersionTag) ? bundledVersionTag : apiVersionTag
+type HeaderServiceItem = {
+  key: string
+  label: string
+  detail?: string
+  href: string
+  icon: string
 }
+
+const headerServiceItems: HeaderServiceItem[] = [
+  {
+    key: 'service-qq',
+    label: 'QQ 交流群：1005859624',
+    href: 'https://qm.qq.com/q/yegwCqJisS',
+    icon: 'lucide:messages-square',
+  },
+  {
+    key: 'service-account',
+    label: '购买生图账号',
+    href: 'https://pay.ldxp.cn/shop/yukkcat',
+    icon: 'lucide:shopping-bag',
+  },
+  {
+    key: 'service-api',
+    label: '生图 API',
+    detail: '小量 ¥0.02/张 · 中转 ¥0.01/张 · 大量/企业 ¥0.009/张',
+    href: 'https://api.klong.lat',
+    icon: 'lucide:badge-dollar-sign',
+  },
+]
+
+const mobileHeaderMenuItems = computed<ActionMenuItem[]>(() => {
+  const items: ActionMenuItem[] = []
+  if (canvasHref.value) items.push({ key: 'canvas', label: '无限画布' })
+  if (authStore.isAdmin) {
+    items.push(
+      { key: 'api-info', label: '接口信息' },
+      { key: 'updates', label: '版本更新' },
+    )
+  }
+  items.push({ key: 'services', label: '交流与服务', dividerBefore: items.length > 0 })
+  return items
+})
+const routePendingText = computed(() => `正在加载${currentPageTitle.value}`)
+let systemThemeMedia: MediaQueryList | null = null
+let viewportMedia: MediaQueryList | null = null
+const prefetchedRoutePaths = new Set<string>()
+const routeProgressDelayMs = 140
+const routeProgressFinishMs = 140
+let routeProgressDelayTimer: number | null = null
+let routeProgressFinishTimer: number | null = null
+const defaultReleasePageUrl = 'https://github.com/yukkcat/chatgpt2api/releases'
+const releasePageUrl = computed(() => updateStatus.value?.release_url || defaultReleasePageUrl)
+const updateCheckingMessage = '正在检查云端版本...'
+const updateTaskPollIntervalMs = 1000
+let updateTaskPollTimer: number | null = null
+let updateReloadScheduled = false
 const routeViewLoaders: Record<string, () => Promise<unknown>> = {
   '/': () => import('@/views/Dashboard.vue'),
   '/accounts': () => import('@/views/Accounts.vue'),
@@ -854,16 +1045,79 @@ const routeViewLoaders: Record<string, () => Promise<unknown>> = {
   '/monitor': () => import('@/views/Monitor.vue'),
   '/proxy': () => import('@/views/Proxy.vue'),
   '/settings': () => import('@/views/Settings.vue'),
-  '/register': () => import('@/views/Register.vue'),
-  '/icloud': () => import('@/views/ICloudPrivacyMail.vue'),
-  '/debug': () => import('@/views/DebugCenter.vue'),
   '/studio': () => import('@/views/Studio.vue'),
 }
+
+function setMobileSidebarScrollLock(locked: boolean) {
+  if (typeof document === 'undefined') return
+  document.documentElement.classList.toggle('app-mobile-sidebar-open', locked)
+  document.body.classList.toggle('app-mobile-sidebar-open', locked)
+}
+
+function focusSidebarToggle() {
+  void nextTick(() => {
+    if (!isMobileViewport.value) return
+    focusRefTarget(sidebarToggleRef.value)
+  })
+}
+
+function focusSidebarNavigation() {
+  void nextTick(() => {
+    if (!isMobileViewport.value || !isSidebarOpen.value) return
+    focusFirstWithin(sidebarRef.value, '#app-sidebar-navigation a[href]')
+  })
+}
+
+function handleSidebarKeydown(event: KeyboardEvent) {
+  if (!isMobileSidebarActive.value) return
+  trapFocusWithin(sidebarRef.value, event)
+}
+
+function openSidebar() {
+  if (!isMobileViewport.value) return
+  isSidebarOpen.value = true
+  focusSidebarNavigation()
+}
+
+function closeSidebar(options: { restoreFocus?: boolean } = {}) {
+  const wasOpen = isSidebarOpen.value
+  isSidebarOpen.value = false
+  if (wasOpen && options.restoreFocus !== false) focusSidebarToggle()
+}
+
+function handleViewportChange(event: MediaQueryListEvent) {
+  isMobileViewport.value = !event.matches
+  if (event.matches) closeSidebar({ restoreFocus: false })
+}
+
+function setupViewportListener() {
+  if (typeof window === 'undefined') return
+  viewportMedia = window.matchMedia('(min-width: 1024px)')
+  isMobileViewport.value = !viewportMedia.matches
+  viewportMedia.addEventListener('change', handleViewportChange)
+}
+
+function teardownViewportListener() {
+  viewportMedia?.removeEventListener('change', handleViewportChange)
+  viewportMedia = null
+  setMobileSidebarScrollLock(false)
+}
+
+function handleWindowKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !isMobileViewport.value || !isSidebarOpen.value) return
+  event.preventDefault()
+  closeSidebar()
+}
+
+watch([isMobileViewport, isSidebarOpen], ([isMobile, isOpen]) => {
+  setMobileSidebarScrollLock(isMobile && isOpen)
+})
 
 watch(
   () => route.path,
   () => {
-    isSidebarOpen.value = false
+    closeSidebar()
+    void loadPublicRuntimeConfig()
   }
 )
 
@@ -890,6 +1144,7 @@ function refreshPage() {
 }
 
 async function handleLogout() {
+  closeSidebar()
   await authStore.logout()
   await router.replace({ name: 'login' })
 }
@@ -897,33 +1152,14 @@ async function handleLogout() {
 async function openApiInfo() {
   currentAuthToken.value = getAuthToken()
   isApiInfoOpen.value = true
-  if (!settingsStore.settings && !settingsStore.isLoading) {
-    await settingsStore.loadSettings()
-  }
-  await loadModelCatalog()
+  await Promise.all([loadModelCatalog(), loadPublicRuntimeConfig()])
 }
 
 async function copyText(value: string) {
   const text = String(value || '').trim()
   if (!text) return
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-    } else {
-      const input = document.createElement('textarea')
-      input.value = text
-      input.setAttribute('readonly', 'readonly')
-      input.style.position = 'fixed'
-      input.style.left = '-9999px'
-      input.style.top = '0'
-      document.body.appendChild(input)
-      input.focus()
-      input.select()
-      input.setSelectionRange(0, input.value.length)
-      const copied = document.execCommand('copy')
-      document.body.removeChild(input)
-      if (!copied) throw new Error('execCommand copy failed')
-    }
+    await writeClipboardText(text)
     toast.success('已复制')
   } catch (error) {
     console.error('Copy failed', error)
@@ -944,6 +1180,24 @@ async function openInfiniteCanvas() {
   }
 }
 
+function handleHeaderMenuSelect(key: string) {
+  if (key === 'services') {
+    isServiceDialogOpen.value = true
+    return
+  }
+  if (key === 'canvas') {
+    void openInfiniteCanvas()
+    return
+  }
+  if (key === 'updates') {
+    openUpdateDialog()
+    return
+  }
+  if (key === 'api-info') {
+    void openApiInfo()
+  }
+}
+
 function setThemeMode(mode: ThemeMode) {
   themeMode.value = mode
   setStoredThemeMode(mode)
@@ -957,78 +1211,160 @@ function cycleThemeMode() {
 
 function openUpdateDialog() {
   isUpdateDialogOpen.value = true
-  updateCheckMessage.value = updateCheckingMessage
-  void loadLocalReleaseEntries()
-  void checkForUpdates(false)
 }
 
 function openReleasePage() {
   window.open(releasePageUrl.value, '_blank', 'noopener,noreferrer')
+  closeUpdateDialog()
 }
 
-async function checkForUpdates(showMessage = true) {
-  if (isCheckingUpdate.value) return
-  isCheckingUpdate.value = true
-  updateCheckMessage.value = updateCheckingMessage
+function closeUpdateDialog() {
+  const latestTag = updateStatus.value?.latest_tag || ''
+  if (updateStatus.value?.update_available && latestTag) {
+    setStringPreference(preferenceKeys.updateDismissedTag, latestTag)
+  }
+  isUpdateDialogOpen.value = false
+}
+
+function clearUpdateTaskPollTimer() {
+  if (updateTaskPollTimer === null) return
+  window.clearTimeout(updateTaskPollTimer)
+  updateTaskPollTimer = null
+}
+
+function applyUpdateTask(task: UpdateTaskResponse, open: boolean) {
+  if (task.state === 'idle') return
+  updateTargetTag.value = normalizeVersionTag(task.latest_tag || updateTargetTag.value)
+  currentVersionTag.value = normalizeVersionTag(task.current_tag || currentVersionTag.value)
+  updateProgressState.open = open
+  updateProgressState.title = task.busy ? '正在更新 ChatGPT2API' : 'ChatGPT2API 更新'
+  updateProgressState.subtitle = task.latest_tag ? `目标版本 ${normalizeVersionTag(task.latest_tag)}` : ''
+  updateProgressState.total = task.total
+  updateProgressState.current = task.current
+  updateProgressState.statusLabel = task.status_label
+  updateProgressState.message = task.message
+  updateProgressState.error = task.error
+  updateProgressState.busy = task.busy
+  updateProgressState.tone = task.tone
+  updateProgressState.events = task.events.map(event => ({
+    key: event.id,
+    timestamp: event.timestamp,
+    label: event.label,
+    message: event.message,
+    tone: event.tone,
+  }))
+}
+
+function scheduleUpdateTaskPoll() {
+  clearUpdateTaskPollTimer()
+  updateTaskPollTimer = window.setTimeout(() => {
+    void pollUpdateTask()
+  }, updateTaskPollIntervalMs)
+}
+
+async function startUpdate() {
+  if (isUpdateConfirming.value || !canStartUpdate.value) return
+  const targetTag = normalizeVersionTag(updateStatus.value?.latest_tag || '')
+  if (!targetTag) return
+
+  isUpdateConfirming.value = true
+  let confirmed = false
   try {
-    const result = await versionApi.check(showMessage)
-    if (result.check_error) throw new Error(result.check_error)
-    currentVersionTag.value = currentVersionCandidate(result.tag || result.version || '')
-    if (!result.latest_tag && !result.latest_version) throw new Error('GitHub 未返回有效版本')
-    latestVersionTag.value = normalizeVersionTag(result.latest_tag || result.latest_version)
-    releasePageUrl.value = result.release_url || projectRepositoryUrl
-    const remoteReleases = parseChangelog(result.changelog || '')
-    if (remoteReleases.length) {
-      releaseEntries.value = remoteReleases
-    }
-    const message = isNewerVersion(latestVersionLabel.value, currentVersionLabel.value)
-      ? `发现新版本：${latestVersionLabel.value}`
-      : `当前已是最新版本：${currentVersionLabel.value || latestVersionLabel.value}`
-    updateCheckMessage.value = message
-    if (showMessage) {
-      if (isNewerVersion(latestVersionLabel.value, currentVersionLabel.value)) toast.info(message)
-      else toast.success(message)
-    }
-  } catch (error: any) {
-    updateCheckMessage.value = 'GitHub 版本检查失败，当前展示本地更新日志。'
-    if (showMessage) {
-      toast.warning(error?.message || 'GitHub 版本检查失败')
-    }
+    confirmed = await confirmDialog.ask({
+      title: '确认更新',
+      message: `检测到新版本 ${targetTag}，当前版本为 ${currentVersionLabel.value || '版本未知'}。确认后将下载并安装更新，服务会自动重启，通常需要 30 秒至 2 分钟。`,
+      confirmText: '立即更新',
+      cancelText: '取消',
+    })
   } finally {
-    isCheckingUpdate.value = false
+    isUpdateConfirming.value = false
+  }
+  if (!confirmed) return
+
+  clearUpdateTaskPollTimer()
+  updateTargetTag.value = targetTag
+  isUpdateDialogOpen.value = false
+
+  try {
+    const task = await versionApi.startUpdate()
+    setStringPreference(preferenceKeys.updateActiveTaskId, task.task_id)
+    applyUpdateTask(task, true)
+    if (task.busy) scheduleUpdateTaskPoll()
+    else await checkForUpdates(false)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '在线更新失败，请稍后重试。'
+    toast.error(message)
   }
 }
 
-async function loadLocalReleaseEntries() {
-  if (releaseEntries.value.length) return
+async function pollUpdateTask() {
   try {
-    const module = await import('../../../CHANGELOG.md?raw')
-    releaseEntries.value = parseChangelog(module.default || '')
+    const task = await versionApi.updateTask()
+    const activeTaskId = getStringPreference(preferenceKeys.updateActiveTaskId)
+    const shouldOpen = task.busy || Boolean(task.task_id && task.task_id === activeTaskId)
+    applyUpdateTask(task, shouldOpen)
+    if (task.busy) {
+      scheduleUpdateTaskPoll()
+      return
+    }
+    clearUpdateTaskPollTimer()
+    await checkForUpdates(false)
+    const targetTag = normalizeVersionTag(task.latest_tag)
+    if (
+      !updateReloadScheduled
+      && task.state === 'succeeded'
+      && targetTag
+      && normalizeVersionTag(localVersion) !== targetTag
+    ) {
+      updateReloadScheduled = true
+      window.setTimeout(() => window.location.reload(), 400)
+    }
   } catch {
-    releaseEntries.value = []
+    if (updateProgressState.busy) scheduleUpdateTaskPoll()
+  }
+}
+
+function closeUpdateProgress() {
+  if (!updateProgressRuntime.close()) return
+  clearUpdateTaskPollTimer()
+  removePreference(preferenceKeys.updateActiveTaskId)
+}
+
+async function checkForUpdates(showMessage = true, openAvailable = false) {
+  if (isCheckingUpdate.value) return
+  isCheckingUpdate.value = true
+  updateRequestError.value = ''
+  try {
+    const result = await versionApi.check(showMessage)
+    updateStatus.value = result
+    currentVersionTag.value = result.current_tag
+    releaseEntries.value = parseChangelog(result.changelog)
+    if (
+      openAvailable
+      && result.update_available
+      && getStringPreference(preferenceKeys.updateDismissedTag) !== result.latest_tag
+    ) {
+      isUpdateDialogOpen.value = true
+    }
+    if (showMessage) {
+      if (result.tone === 'warning') toast.warning(result.status_message)
+      else if (result.update_available) toast.info(result.status_message)
+      else toast.success(result.status_message)
+    }
+  } catch {
+    updateRequestError.value = '无法连接后端检查更新，请稍后重试。'
+    if (showMessage) toast.warning(updateRequestError.value)
+  } finally {
+    isCheckingUpdate.value = false
   }
 }
 
 async function loadCurrentVersion() {
   try {
     const result = await versionApi.current()
-    currentVersionTag.value = currentVersionCandidate(result.tag || result.version || '')
-    if (!latestVersionTag.value) {
-      latestVersionTag.value = normalizeVersionTag(releaseEntries.value[0]?.version || currentVersionTag.value)
-    }
-  } catch {
-    currentVersionTag.value = bundledVersionTag
-    if (!latestVersionTag.value) {
-      latestVersionTag.value = normalizeVersionTag(releaseEntries.value[0]?.version || '')
-    }
-  }
-}
-
-async function initializeVersionStatus() {
-  await loadCurrentVersion()
-  if (authStore.isAdmin) {
-    await checkForUpdates(false)
-  }
+    const runtimeVersion = String(result.tag || '').trim()
+    if (runtimeVersion) currentVersionTag.value = runtimeVersion
+  } catch {}
 }
 
 function handleSystemThemeChange() {
@@ -1043,17 +1379,64 @@ function setupSystemThemeListener() {
   systemThemeMedia.addEventListener('change', handleSystemThemeChange)
 }
 
-async function loadThirdPartyApps() {
-  try {
-    thirdPartyApps.value = await settingsApi.getThirdPartyApps()
-  } catch {
-    thirdPartyApps.value = null
-  }
+function handlePublicSettingsChanged() {
+  void loadPublicRuntimeConfig(true)
 }
 
 function normalizedRoutePath(path: string) {
   if (!path || path === '/') return '/'
   return `/${path.replace(/^\/+/, '').split(/[?#]/)[0]}`
+}
+
+function clearRouteProgressDelayTimer() {
+  if (routeProgressDelayTimer === null) return
+  window.clearTimeout(routeProgressDelayTimer)
+  routeProgressDelayTimer = null
+}
+
+function clearRouteProgressFinishTimer() {
+  if (routeProgressFinishTimer === null) return
+  window.clearTimeout(routeProgressFinishTimer)
+  routeProgressFinishTimer = null
+}
+
+function beginRouteNavigation(path: string) {
+  const normalizedPath = normalizedRoutePath(path)
+  if (normalizedPath === normalizedRoutePath(route.path)) return
+  if (pendingNavigationPath.value === normalizedPath && routeProgressPhase.value !== 'finishing') return
+
+  pendingNavigationPath.value = normalizedPath
+  clearRouteProgressDelayTimer()
+  clearRouteProgressFinishTimer()
+  routeProgressPhase.value = 'idle'
+  routeProgressDelayTimer = window.setTimeout(() => {
+    routeProgressDelayTimer = null
+    if (pendingNavigationPath.value !== normalizedPath) return
+    routeProgressPhase.value = 'running'
+  }, routeProgressDelayMs)
+}
+
+function finishRouteNavigation(path?: string) {
+  const normalizedPath = path ? normalizedRoutePath(path) : ''
+  if (
+    normalizedPath
+    && pendingNavigationPath.value
+    && normalizedPath !== pendingNavigationPath.value
+  ) return
+
+  pendingNavigationPath.value = ''
+  clearRouteProgressDelayTimer()
+  clearRouteProgressFinishTimer()
+  if (routeProgressPhase.value !== 'running') {
+    routeProgressPhase.value = 'idle'
+    return
+  }
+
+  routeProgressPhase.value = 'finishing'
+  routeProgressFinishTimer = window.setTimeout(() => {
+    routeProgressFinishTimer = null
+    routeProgressPhase.value = 'idle'
+  }, routeProgressFinishMs)
 }
 
 function prefetchRouteView(path: string) {
@@ -1066,96 +1449,275 @@ function prefetchRouteView(path: string) {
   })
 }
 
-function handleNavClick() {
-  isSidebarOpen.value = false
+function handleNavClick(path: string) {
+  beginRouteNavigation(path)
+  closeSidebar()
 }
 
-function stopRoutePending() {
-  if (routePendingTimer !== null) {
-    window.clearTimeout(routePendingTimer)
-    routePendingTimer = null
-  }
-  isRoutePending.value = false
-}
-
-function startRoutePending(title: string) {
-  stopRoutePending()
-  pendingRouteTitle.value = title
-  routePendingTimer = window.setTimeout(() => {
-    isRoutePending.value = true
-  }, 120)
-}
-
-function setupRoutePendingGuards() {
-  stopRoutePendingBeforeEach = router.beforeEach((to, from) => {
-    if (to.fullPath !== from.fullPath) {
-      startRoutePending(titleForRoute(to.name, to.path))
-    }
-    return true
-  })
-  stopRoutePendingAfterEach = router.afterEach(() => {
-    stopRoutePending()
-  })
-  stopRoutePendingError = router.onError(() => {
-    stopRoutePending()
-  })
-}
-
-function teardownRoutePendingGuards() {
-  stopRoutePendingBeforeEach?.()
-  stopRoutePendingAfterEach?.()
-  stopRoutePendingError?.()
-  stopRoutePendingBeforeEach = null
-  stopRoutePendingAfterEach = null
-  stopRoutePendingError = null
-  stopRoutePending()
-}
+const removeRouteBeforeGuard = router.beforeEach((to, from) => {
+  if (to.fullPath !== from.fullPath) beginRouteNavigation(to.path)
+})
+const removeRouteAfterHook = router.afterEach((to) => {
+  void nextTick(() => finishRouteNavigation(to.path))
+})
+const removeRouteErrorHook = router.onError((_error, to) => {
+  finishRouteNavigation(to.path)
+})
 
 onMounted(() => {
   applyThemeMode(themeMode.value)
   setupSystemThemeListener()
-  setupRoutePendingGuards()
-  void initializeVersionStatus()
-  void loadThirdPartyApps()
+  setupViewportListener()
+  window.addEventListener(PUBLIC_SETTINGS_CHANGED_EVENT, handlePublicSettingsChanged)
+  window.addEventListener('keydown', handleWindowKeydown)
+  void loadCurrentVersion()
+  if (authStore.isAdmin) {
+    void checkForUpdates(false, true)
+    void pollUpdateTask()
+  }
+  void loadPublicRuntimeConfig()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener(PUBLIC_SETTINGS_CHANGED_EVENT, handlePublicSettingsChanged)
+  window.removeEventListener('keydown', handleWindowKeydown)
   systemThemeMedia?.removeEventListener('change', handleSystemThemeChange)
   systemThemeMedia = null
-  teardownRoutePendingGuards()
+  teardownViewportListener()
+  clearUpdateTaskPollTimer()
+  clearRouteProgressDelayTimer()
+  clearRouteProgressFinishTimer()
+  removeRouteBeforeGuard()
+  removeRouteAfterHook()
+  removeRouteErrorHook()
 })
 
 </script>
 
 <style scoped>
+:global(html.app-mobile-sidebar-open),
+:global(body.app-mobile-sidebar-open) {
+  overflow: hidden;
+}
+
 .route-view-content {
   min-width: 0;
 }
 
-.route-pending-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 80;
-  height: 2px;
-  overflow: hidden;
-  background: hsl(var(--primary) / 0.16);
-  pointer-events: none;
+.route-view-enter-active {
+  transition: opacity 140ms ease-out;
 }
 
-.route-pending-bar::after {
+.route-view-enter-from {
+  opacity: 0.88;
+}
+
+.route-progress-enter-active,
+.route-progress-leave-active {
+  transition: opacity 100ms ease-out;
+}
+
+.route-progress-enter-from,
+.route-progress-leave-to {
+  opacity: 0;
+}
+
+.shell-route-progress {
+  background: hsl(var(--primary) / 0.12);
+}
+
+.shell-route-progress-bar {
+  transform: scaleX(0.08);
+  transform-origin: left center;
+  animation: shell-route-progress-running 1.4s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.shell-route-progress-bar--finishing {
+  animation: none;
+  transform: scaleX(1);
+  transition: transform 120ms ease-out;
+}
+
+@keyframes shell-route-progress-running {
+  0% {
+    transform: scaleX(0.08);
+  }
+
+  60% {
+    transform: scaleX(0.62);
+  }
+
+  100% {
+    transform: scaleX(0.84);
+  }
+}
+
+.sidebar-nav-scroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.sidebar-nav-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.sidebar-label {
   display: block;
-  width: 100%;
-  height: 100%;
-  content: '';
-  background: hsl(var(--primary));
-  box-shadow: 0 0 14px hsl(var(--primary) / 0.3);
-  animation: route-pending-pulse 0.9s ease-in-out infinite alternate;
+  min-width: 0;
+  max-width: 11rem;
+  flex: 1 1 auto;
+  overflow: hidden;
+  margin-inline-start: 0.75rem;
+  white-space: nowrap;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    max-width 0.2s ease,
+    margin-inline-start 0.2s ease,
+    opacity 0.12s ease 0.04s,
+    transform 0.2s ease;
 }
 
-@keyframes route-pending-pulse {
-  from { opacity: 0.36; }
-  to { opacity: 1; }
+.sidebar-brand-label {
+  flex: 0 1 auto;
+}
+
+.sidebar-section-label {
+  max-height: 1.75rem;
+  overflow: hidden;
+  padding-bottom: 0.5rem;
+  white-space: nowrap;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    max-height 0.2s ease,
+    padding-bottom 0.2s ease,
+    opacity 0.12s ease 0.04s,
+    transform 0.2s ease;
+}
+
+.sidebar-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.sidebar-logout {
+  display: inline-flex;
+  min-width: 0;
+  height: 2rem;
+  flex: 1 1 auto;
+  justify-content: center;
+  overflow: hidden;
+  padding-inline: 0.75rem;
+}
+
+.sidebar-logout-label {
+  flex: 0 1 auto;
+  margin-inline-start: 0;
+}
+
+.sidebar-footer-tooltip-trigger {
+  display: inline-flex;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-collapse-button {
+  flex: none;
+}
+
+.sidebar--rail .sidebar-label {
+  max-width: 0;
+  margin-inline-start: 0;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition-delay: 0s;
+}
+
+.sidebar--rail .sidebar-section-label {
+  max-height: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition-delay: 0s;
+}
+
+.sidebar--rail .sidebar-footer-actions {
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sidebar--rail .sidebar-logout {
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: 0 0 2.25rem;
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar--rail .sidebar-collapse-button {
+  width: 2.25rem;
+  height: 2.25rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-view-enter-active,
+  .route-progress-enter-active,
+  .route-progress-leave-active,
+  .shell-route-progress-bar,
+  .shell-route-progress-bar--finishing {
+    animation: none;
+    transition: none;
+  }
+
+  .shell-route-progress-bar {
+    transform: scaleX(0.84);
+  }
+
+  .shell-route-progress-bar--finishing {
+    transform: scaleX(1);
+  }
+
+  .sidebar-label,
+  .sidebar-section-label {
+    transition: none;
+  }
+}
+
+@media (max-width: 1023px) {
+  .sidebar--rail .sidebar-label {
+    max-width: 11rem;
+    margin-inline-start: 0.75rem;
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .sidebar--rail .sidebar-section-label {
+    max-height: 1.75rem;
+    padding-bottom: 0.5rem;
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .sidebar--rail .sidebar-footer-actions {
+    flex-direction: row;
+    gap: 0.75rem;
+  }
+
+  .sidebar--rail .sidebar-logout {
+    width: auto;
+    height: 2rem;
+    flex: 1 1 auto;
+    justify-content: center;
+    padding-inline: 0.75rem;
+  }
+
+  .sidebar-collapse-button {
+    display: none;
+  }
 }
 </style>

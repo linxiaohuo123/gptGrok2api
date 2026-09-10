@@ -1,7 +1,7 @@
 <template>
   <button
     type="button"
-    class="ui-input-sm ui-select-trigger studio-toolbar-select-button"
+    class="ui-input-sm ui-select-trigger studio-toolbar-select-button text-left"
     :aria-expanded="expanded"
     :disabled="disabled"
   >

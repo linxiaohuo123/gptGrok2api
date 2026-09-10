@@ -1,3 +1,8 @@
+// [INPUT]: agentidentity/oauth/provider
+// [OUTPUT]: OAuth 账号导出与 Agent Identity 归档
+// [POS]: 把账号凭据导出成可迁移形态，私钥单独归档不进普通列表。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (

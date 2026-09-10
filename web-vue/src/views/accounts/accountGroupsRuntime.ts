@@ -1,7 +1,7 @@
 import { computed, reactive, ref, type Ref } from 'vue'
 
 import { accountsApi, type AccountGroup } from '@/api/accounts'
-import { parseProxyReference, serializeProxyReference, type ProxyGroup } from '@/api/proxy'
+import { serializeProxyReference, type ProxyGroup } from '@/api/proxy'
 import type { usePageRuntime } from '@/composables/usePageRuntime'
 import { usePageQuery } from '@/composables/usePageQuery'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -74,6 +74,7 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
   const accountGroupProxyMode = ref<AccountProxyMode>('global')
   const selectedAccountGroupProxyGroupId = ref('')
   const accountGroupCustomProxyInput = ref('')
+  const projectedAccountGroupProxyLabel = ref('')
   const accountGroupForm = reactive(createDefaultAccountGroupForm())
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
@@ -115,46 +116,49 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
   ])
 
   const accountGroupProxyPreview = computed(() => {
-    const reference = parseProxyReference(accountGroupForm.proxy)
-    if (reference.mode === 'global') return '使用默认代理'
-    if (reference.mode === 'direct') return '强制直连'
-    if (reference.mode === 'profile') {
-      return `历史兼容引用：profile:${reference.value || '-'}`
+    if (projectedAccountGroupProxyLabel.value) return projectedAccountGroupProxyLabel.value
+    if (accountGroupProxyMode.value === 'global') return '使用默认出口'
+    if (accountGroupProxyMode.value === 'direct') return '强制直连'
+    if (accountGroupProxyMode.value === 'group') {
+      const group = proxyGroups.value.find((item) => item.id === selectedAccountGroupProxyGroupId.value)
+      return `代理组：${group?.name || selectedAccountGroupProxyGroupId.value || '-'}`
     }
-    if (reference.mode === 'group') {
-      const group = proxyGroups.value.find((item) => item.id === reference.value)
-      return `代理组：${group?.name || reference.value || '-'}`
-    }
-    return reference.value || '自定义代理'
+    return accountGroupCustomProxyInput.value || '自定义代理'
   })
 
-  function syncAccountGroupProxyControlsFromValue(value: unknown, legacyProxyGroupId = '') {
-    const fallback = legacyProxyGroupId ? serializeProxyReference('group', legacyProxyGroupId) : ''
-    const raw = String(value || '').trim() || fallback
-    const reference = parseProxyReference(raw)
+  function syncAccountGroupProxyControlsFromProjection(group?: AccountGroup) {
+    const mode = group?.proxy_mode || 'inherit'
+    const legacyGroupId = String(group?.proxy_group_id || '').trim()
+    const raw = String(group?.proxy || '').trim() || (legacyGroupId ? serializeProxyReference('group', legacyGroupId) : '')
     accountGroupCustomProxyInput.value = ''
     selectedAccountGroupProxyGroupId.value = ''
-    accountGroupProxyMode.value = reference.mode === 'profile' ? 'custom' : reference.mode
+    projectedAccountGroupProxyLabel.value = String(group?.proxy_label || '').trim()
+    accountGroupProxyMode.value = mode === 'inherit' ? 'global' : mode === 'profile' ? 'custom' : mode
     accountGroupForm.proxy = raw
     accountGroupForm.proxy_group_id = ''
-    if (reference.mode === 'profile') {
+    if (mode === 'profile') {
       accountGroupCustomProxyInput.value = raw
       return
     }
-    if (reference.mode === 'group') {
-      selectedAccountGroupProxyGroupId.value = reference.value
-      accountGroupForm.proxy_group_id = reference.value
+    if (mode === 'group') {
+      selectedAccountGroupProxyGroupId.value = legacyGroupId
+      accountGroupForm.proxy_group_id = legacyGroupId
       return
     }
-    if (reference.mode === 'custom') {
-      accountGroupCustomProxyInput.value = reference.value
+    if (mode === 'custom') {
+      accountGroupCustomProxyInput.value = raw
     }
+  }
+
+  function beginAccountGroupProxyDraft() {
+    projectedAccountGroupProxyLabel.value = ''
   }
 
   function setAccountGroupProxyMode(mode: string) {
     const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
       ? mode as AccountProxyMode
       : 'global'
+    beginAccountGroupProxyDraft()
     accountGroupProxyMode.value = nextMode
     accountGroupForm.proxy_group_id = ''
     if (nextMode === 'global') {
@@ -170,6 +174,7 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
   }
 
   function selectAccountGroupProxyGroup(groupId: string) {
+    beginAccountGroupProxyDraft()
     selectedAccountGroupProxyGroupId.value = groupId.trim()
     accountGroupProxyMode.value = 'group'
     accountGroupForm.proxy_group_id = selectedAccountGroupProxyGroupId.value
@@ -177,6 +182,7 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
   }
 
   function setAccountGroupCustomProxyInput(value: string) {
+    beginAccountGroupProxyDraft()
     accountGroupCustomProxyInput.value = value.trim()
     accountGroupProxyMode.value = 'custom'
     accountGroupForm.proxy_group_id = ''
@@ -222,7 +228,7 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
   function resetAccountGroupForm() {
     Object.assign(accountGroupForm, createDefaultAccountGroupForm())
     editingAccountGroupId.value = ''
-    syncAccountGroupProxyControlsFromValue(accountGroupForm.proxy)
+    syncAccountGroupProxyControlsFromProjection()
   }
 
   function openAccountGroupsModal() {
@@ -238,17 +244,16 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
   }
 
   function editAccountGroup(group: AccountGroup) {
-    const proxy = group.proxy || (group.proxy_group_id ? serializeProxyReference('group', group.proxy_group_id) : '')
     editingAccountGroupId.value = group.id
     Object.assign(accountGroupForm, {
       id: group.id,
       name: group.name || group.id,
-      proxy,
+      proxy: group.proxy || '',
       proxy_group_id: group.proxy_group_id || '',
       enabled: group.enabled !== false,
       notes: group.notes || '',
     })
-    syncAccountGroupProxyControlsFromValue(proxy, group.proxy_group_id || '')
+    syncAccountGroupProxyControlsFromProjection(group)
   }
 
   async function saveAccountGroup() {

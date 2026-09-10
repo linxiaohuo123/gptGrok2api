@@ -18,23 +18,11 @@ const props = defineProps<{
   account: Account
 }>()
 
-const quotaValue = computed(() => Number(props.account.quota || 0))
-
-const quotaText = computed(() => {
-  if (props.account.image_quota_unknown) return '未知'
-  return String(Math.max(0, Math.trunc(quotaValue.value)))
-})
+const quotaText = computed(() => props.account.quota_label)
 
 const quotaTone = computed(() => {
-  if (props.account.image_quota_unknown) {
-    return 'muted'
-  }
-  if (quotaValue.value <= 0) {
-    return 'danger'
-  }
-  if (quotaValue.value <= 3) {
-    return 'warning'
-  }
+  if (props.account.quota_state === 'exhausted') return 'danger'
+  if (props.account.quota_state === 'unknown') return 'muted'
   return 'success'
 })
 </script>

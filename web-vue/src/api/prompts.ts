@@ -1,325 +1,190 @@
-import axios, { type Method } from 'axios'
-import { getAuthToken } from './client'
+import { apiClient } from './client'
+
+export type PromptImageMode = '' | 'generate' | 'edit'
+export type PromptSourceSyncState = 'disabled' | 'pending' | 'synced' | 'cached' | 'failed'
+export type PromptSourceSyncTone = 'muted' | 'success' | 'warning' | 'danger'
 
 export interface PromptLibraryItem {
   id: string
   source_id: string
   source_name: string
-  source_url: string
   title: string
+  prompt: string
   description: string
   preview: string
   link: string
-  prompt: string
-  mode: string
-  image_mode: string
+  author: string
   category: string
   sub_category: string
   tags: string[]
   reference_image_urls: string[]
+  image_mode: PromptImageMode
   image_model: string
   image_size: string
-  image_count?: number
-  enabled: boolean
-  sort_order?: number
+  image_count: number | null
   created_at: string
-  updated_at: string
 }
 
 export interface PromptSource {
   id: string
   name: string
   url: string
-  adapter: string
-  adapter_label: string
   homepage: string
   enabled: boolean
   built_in: boolean
-  sort_order?: number
-  created_at: string
-  updated_at: string
+  sort_order: number
   prompt_count: number
+  cached: boolean
+  sync_state: PromptSourceSyncState
+  sync_label: string
+  sync_message: string
+  sync_tone: PromptSourceSyncTone
   last_sync_at: string
   last_error: string
-  last_fetch_ms?: number
+  last_fetch_ms: number | null
+}
+
+export interface PromptSourceError {
+  id: string
+  name: string
+  error: string
+}
+
+export type PromptSourceSyncSummaryStatus = 'success' | 'partial' | 'failed'
+export type PromptSourceSyncSummaryTone = 'success' | 'warning' | 'danger'
+
+export interface PromptSourceSyncSummary {
+  status: PromptSourceSyncSummaryStatus
+  tone: PromptSourceSyncSummaryTone
+  total: number
+  succeeded: number
+  failed: number
+  message: string
+}
+
+export interface PromptLibraryView {
+  schema_version: 1
+  generated_at: string
+  revision: string
+  registry_revision: string
+  registry_generated_at: string
+  synced: boolean
+  prompt_count: number
+  source_count: number
+  enabled_source_count: number
+  cached_source_count: number
+  source_error_count: number
+  sync_summary: PromptSourceSyncSummary
+  source_errors: PromptSourceError[]
+  items: PromptLibraryItem[]
+  sources: PromptSource[]
 }
 
 export interface PromptSourcePayload {
   enabled?: boolean
 }
 
-export interface PromptLibraryResponse {
-  items: PromptLibraryItem[]
-  prompt_count?: number
-  sources: PromptSource[]
-  source_count?: number
-  synced?: boolean
-  cached_source_count?: number
-  enabled_source_count?: number
-  source_error_count?: number
-  source_errors?: Array<{ id: string; name: string; error: string }>
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
-export interface PromptSourceResponse {
-  sources: PromptSource[]
-  source_count?: number
-  source?: PromptSource
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0
 }
 
-type PromptApiFailure = {
-  url: string
-  status?: number
-  contentType?: string
-  reason: string
-}
+const PROMPT_SOURCE_SYNC_STATES = new Set<PromptSourceSyncState>([
+  'disabled',
+  'pending',
+  'synced',
+  'cached',
+  'failed',
+])
+const PROMPT_SOURCE_SYNC_TONES = new Set<PromptSourceSyncTone>([
+  'muted',
+  'success',
+  'warning',
+  'danger',
+])
+const PROMPT_SOURCE_SYNC_SUMMARY_STATUSES = new Set<PromptSourceSyncSummaryStatus>([
+  'success',
+  'partial',
+  'failed',
+])
+const PROMPT_SOURCE_SYNC_SUMMARY_TONES = new Set<PromptSourceSyncSummaryTone>([
+  'success',
+  'warning',
+  'danger',
+])
 
-const PROMPT_API_TIMEOUT_MS = 60000
+function validatePromptLibraryView(value: unknown): PromptLibraryView {
+  if (!isRecord(value) || value.schema_version !== 1) {
+    throw new Error('提示词库响应版本不受支持，请确认前后端版本一致。')
+  }
+  if (typeof value.revision !== 'string' || !value.revision) {
+    throw new Error('提示词库响应缺少 revision。')
+  }
+  if (!Array.isArray(value.items) || !Array.isArray(value.sources) || !Array.isArray(value.source_errors)) {
+    throw new Error('提示词库响应缺少 items、sources 或 source_errors。')
+  }
 
-function trimBaseUrl(value: unknown) {
-  return String(value || '').replace(/\/+$/, '')
-}
-
-function promptApiBaseCandidates(): string[] {
-  const configured = trimBaseUrl(import.meta.env.VITE_API_URL)
-  const bases = [configured]
-
-  if (import.meta.env.DEV && typeof window !== 'undefined') {
-    const { protocol, hostname, port } = window.location
-    if (!configured && port && port !== '8000') {
-      bases.push(`${protocol}//${hostname}:8000`)
-      if (hostname === 'localhost') bases.push(`${protocol}//127.0.0.1:8000`)
-      if (hostname === '127.0.0.1') bases.push(`${protocol}//localhost:8000`)
+  const counts: Array<[unknown, number, string]> = [
+    [value.prompt_count, value.items.length, 'prompt_count'],
+    [value.source_count, value.sources.length, 'source_count'],
+    [value.source_error_count, value.source_errors.length, 'source_error_count'],
+  ]
+  for (const [actual, expected, field] of counts) {
+    if (!isNonNegativeInteger(actual) || actual !== expected) {
+      throw new Error(`提示词库响应中的 ${field} 与列表不一致。`)
     }
   }
-
-  return Array.from(new Set(bases))
-}
-
-function promptApiUrl(baseUrl: string, path: string) {
-  return baseUrl ? `${baseUrl}${path}` : path
-}
-
-function promptApiPageOrigin() {
-  if (typeof window === 'undefined') return ''
-  return window.location.origin
-}
-
-function describePromptApiFailure(label: string, path: string, failures: PromptApiFailure[]) {
-  const last = failures[failures.length - 1]
-  const details = last
-    ? `请求地址：${last.url}；页面：${promptApiPageOrigin() || '-'}；Content-Type：${last.contentType || '-'}`
-    : `请求路径：${path}`
-  return `${label} 请求没有拿到 API JSON。${details}。${last?.reason || '请确认前端 API 指向当前后端。'}`
-}
-
-function parsePromptApiJson(text: string, label: string, url: string, contentType: string): Record<string, unknown> {
-  const payloadText = text.trim()
-  if (payloadText.startsWith('<')) {
-    throw new Error(`${label} 请求拿到了 HTML 页面，不是 API JSON。请求地址：${url}；Content-Type：${contentType || '-'}`)
+  if (!isNonNegativeInteger(value.enabled_source_count) || !isNonNegativeInteger(value.cached_source_count)) {
+    throw new Error('提示词库响应中的词源计数无效。')
   }
-  try {
-    const parsed = JSON.parse(payloadText)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
-    }
-  } catch {
-    // handled by the unified error below
+  if (
+    !isRecord(value.sync_summary)
+    || !PROMPT_SOURCE_SYNC_SUMMARY_STATUSES.has(value.sync_summary.status as PromptSourceSyncSummaryStatus)
+    || !PROMPT_SOURCE_SYNC_SUMMARY_TONES.has(value.sync_summary.tone as PromptSourceSyncSummaryTone)
+    || !isNonNegativeInteger(value.sync_summary.total)
+    || !isNonNegativeInteger(value.sync_summary.succeeded)
+    || !isNonNegativeInteger(value.sync_summary.failed)
+    || value.sync_summary.total !== value.enabled_source_count
+    || value.sync_summary.failed !== value.source_error_count
+    || value.sync_summary.succeeded + value.sync_summary.failed !== value.sync_summary.total
+    || typeof value.sync_summary.message !== 'string'
+    || !value.sync_summary.message.trim()
+  ) {
+    throw new Error('提示词库响应中的同步摘要无效。')
   }
-  throw new Error(`${label} 返回格式异常，请确认后端已返回 JSON 对象。请求地址：${url}`)
+  if (!value.items.every((item) => isRecord(item) && typeof item.id === 'string' && typeof item.prompt === 'string')) {
+    throw new Error('提示词库响应包含无效提示词。')
+  }
+  if (!value.sources.every((source) => (
+    isRecord(source)
+    && typeof source.id === 'string'
+    && typeof source.enabled === 'boolean'
+    && PROMPT_SOURCE_SYNC_STATES.has(source.sync_state as PromptSourceSyncState)
+    && typeof source.sync_label === 'string'
+    && typeof source.sync_message === 'string'
+    && PROMPT_SOURCE_SYNC_TONES.has(source.sync_tone as PromptSourceSyncTone)
+  ))) {
+    throw new Error('提示词库响应包含无效词源。')
+  }
+  return value as unknown as PromptLibraryView
 }
 
-function responseErrorMessage(text: string, fallback: string) {
-  const payloadText = text.trim()
-  if (payloadText.startsWith('{') || payloadText.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(payloadText)
-      const detail = parsed?.detail
-      const error = detail?.error || parsed?.error || parsed?.message
-      if (error) return String(error)
-    } catch {
-      // fall through
-    }
-  }
-  return fallback
-}
-
-async function requestPromptApi<T extends object>(
-  method: Method,
-  path: string,
-  label: string,
-  data?: unknown,
-): Promise<T> {
-  const token = getAuthToken()
-  const failures: PromptApiFailure[] = []
-
-  for (const baseUrl of promptApiBaseCandidates()) {
-    const url = promptApiUrl(baseUrl, path)
-    try {
-      const response = await axios.request<string>({
-        method,
-        url,
-        data,
-        timeout: PROMPT_API_TIMEOUT_MS,
-        responseType: 'text',
-        transformResponse: [(value) => value],
-        validateStatus: () => true,
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      })
-      const contentType = String(response.headers?.['content-type'] || '')
-      const text = String(response.data || '')
-
-      if (response.status < 200 || response.status >= 300) {
-        const reason = responseErrorMessage(text, `HTTP ${response.status}`)
-        failures.push({ url, status: response.status, contentType, reason })
-        if (response.status === 401 || response.status === 403) {
-          throw new Error(`${label} 请求失败：${reason}`)
-        }
-        continue
-      }
-
-      if (contentType.includes('text/html') || text.trim().startsWith('<')) {
-        failures.push({ url, status: response.status, contentType, reason: '返回的是前端页面 HTML，说明请求被静态页面兜底接走。' })
-        continue
-      }
-
-      return parsePromptApiJson(text, label, url, contentType) as T
-    } catch (error: any) {
-      const message = String(error?.message || error || '请求失败')
-      if (message.includes('请求失败：') || message.includes('请求拿到了 HTML 页面')) throw error
-      failures.push({ url, reason: message })
-    }
-  }
-
-  throw new Error(describePromptApiFailure(label, path, failures))
-}
-
-function cleanText(value: unknown) {
-  return String(value || '').trim()
-}
-
-function normalizeStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value.map(cleanText).filter(Boolean)
-}
-
-function normalizePrompt(raw: Partial<PromptLibraryItem>): PromptLibraryItem {
-  const imageCount = Number(raw.image_count)
-  const sortOrder = Number(raw.sort_order)
-  return {
-    id: cleanText(raw.id),
-    source_id: cleanText(raw.source_id),
-    source_name: cleanText(raw.source_name),
-    source_url: cleanText(raw.source_url),
-    title: cleanText(raw.title),
-    description: cleanText(raw.description),
-    preview: cleanText(raw.preview),
-    link: cleanText(raw.link),
-    prompt: cleanText(raw.prompt),
-    mode: cleanText(raw.mode),
-    image_mode: cleanText(raw.image_mode),
-    category: cleanText(raw.category),
-    sub_category: cleanText(raw.sub_category),
-    tags: normalizeStringList(raw.tags),
-    reference_image_urls: normalizeStringList(raw.reference_image_urls),
-    image_model: cleanText(raw.image_model),
-    image_size: cleanText(raw.image_size),
-    image_count: Number.isFinite(imageCount) ? imageCount : undefined,
-    enabled: raw.enabled !== false,
-    sort_order: Number.isFinite(sortOrder) ? sortOrder : undefined,
-    created_at: cleanText(raw.created_at),
-    updated_at: cleanText(raw.updated_at),
-  }
-}
-
-function normalizeSource(raw: Partial<PromptSource>): PromptSource {
-  const sortOrder = Number(raw.sort_order)
-  const lastFetchMs = Number(raw.last_fetch_ms)
-  return {
-    id: cleanText(raw.id),
-    name: cleanText(raw.name),
-    url: cleanText(raw.url),
-    adapter: cleanText(raw.adapter) || 'json',
-    adapter_label: cleanText(raw.adapter_label) || cleanText(raw.adapter) || 'JSON',
-    homepage: cleanText(raw.homepage),
-    enabled: raw.enabled !== false,
-    built_in: Boolean(raw.built_in),
-    sort_order: Number.isFinite(sortOrder) ? sortOrder : undefined,
-    created_at: cleanText(raw.created_at),
-    updated_at: cleanText(raw.updated_at),
-    prompt_count: Number(raw.prompt_count) || 0,
-    last_sync_at: cleanText(raw.last_sync_at),
-    last_error: cleanText(raw.last_error),
-    last_fetch_ms: Number.isFinite(lastFetchMs) ? lastFetchMs : undefined,
-  }
-}
-
-function coercePlainObject(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value === 'string') {
-    const text = value.trim()
-    if (text.startsWith('{') || text.startsWith('[')) {
-      try {
-        return coercePlainObject(JSON.parse(text), label)
-      } catch {
-        throw new Error(`${label} 返回了无法解析的 JSON 字符串，请确认后端响应格式。`)
-      }
-    }
-    if (text.startsWith('<')) {
-      throw new Error(`${label} 请求拿到了 HTML 页面，不是 API JSON；请确认前端 API 指向当前后端。`)
-    }
-  }
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>
-  }
-  throw new Error(`${label} 返回格式异常，请确认后端已重启并返回 JSON 数据。`)
-}
-
-function normalizeLibraryResponse(response: Partial<PromptLibraryResponse>): PromptLibraryResponse {
-  const payload = coercePlainObject(response, '提示词库')
-  if (!Array.isArray(payload.items) || !Array.isArray(payload.sources)) {
-    throw new Error('提示词库返回缺少 items 或 sources 字段，请确认后端版本已更新。')
-  }
-  const rawItems = Array.isArray(response.items) ? response.items : []
-  const items = rawItems.map(normalizePrompt).filter((item) => item.id && item.title && item.prompt)
-  const sources = Array.isArray(response.sources)
-    ? response.sources.map(normalizeSource).filter((source) => source.id && source.url)
-    : []
-  return {
-    ...response,
-    items,
-    sources,
-    prompt_count: Number.isFinite(Number(response.prompt_count)) ? Number(response.prompt_count) : items.length,
-    source_count: Number.isFinite(Number(response.source_count)) ? Number(response.source_count) : sources.length,
-    synced: Boolean(response.synced),
-    cached_source_count: Number(response.cached_source_count) || 0,
-    enabled_source_count: Number(response.enabled_source_count) || 0,
-    source_error_count: Number(response.source_error_count) || 0,
-    source_errors: Array.isArray(response.source_errors) ? response.source_errors : [],
-  }
-}
-
-function normalizeSourceResponse(response: Partial<PromptSourceResponse>): PromptSourceResponse {
-  const payload = coercePlainObject(response, '提示词源')
-  if (!Array.isArray(payload.sources)) {
-    throw new Error('提示词源返回缺少 sources 字段，请确认后端版本已更新。')
-  }
-  const sources = Array.isArray(response.sources)
-    ? response.sources.map(normalizeSource).filter((source) => source.id && source.url)
-    : []
-  return {
-    ...response,
-    sources,
-    source: response.source ? normalizeSource(response.source) : undefined,
-    source_count: Number.isFinite(Number(response.source_count)) ? Number(response.source_count) : sources.length,
-  }
+async function promptViewRequest(request: Promise<unknown>) {
+  return validatePromptLibraryView(await request)
 }
 
 export const promptsApi = {
-  list: async () => normalizeLibraryResponse(await requestPromptApi<PromptLibraryResponse>('GET', '/api/prompts', '提示词库')),
-  listSources: async () => normalizeSourceResponse(await requestPromptApi<PromptSourceResponse>('GET', '/api/admin/prompt-sources', '提示词源')),
-  updateSource: async (id: string, payload: PromptSourcePayload) =>
-    normalizeSourceResponse(await requestPromptApi<PromptSourceResponse>('POST', `/api/admin/prompt-sources/${encodeURIComponent(id)}`, '提示词源', payload)),
-  refreshSource: async (id: string) =>
-    normalizeLibraryResponse(await requestPromptApi<PromptLibraryResponse>('POST', `/api/admin/prompt-sources/${encodeURIComponent(id)}/refresh`, '提示词源更新')),
-  refreshSources: async () =>
-    normalizeLibraryResponse(await requestPromptApi<PromptLibraryResponse>('POST', '/api/admin/prompt-sources/refresh', '提示词源更新')),
+  list: () => promptViewRequest(apiClient.get<never, unknown>('/api/prompts')),
+  updateSource: (id: string, payload: PromptSourcePayload) => promptViewRequest(
+    apiClient.post<PromptSourcePayload, unknown>(`/api/admin/prompt-sources/${encodeURIComponent(id)}`, payload),
+  ),
+  refreshSource: (id: string) => promptViewRequest(
+    apiClient.post<never, unknown>(`/api/admin/prompt-sources/${encodeURIComponent(id)}/refresh`),
+  ),
+  refreshSources: () => promptViewRequest(
+    apiClient.post<never, unknown>('/api/admin/prompt-sources/refresh'),
+  ),
 }

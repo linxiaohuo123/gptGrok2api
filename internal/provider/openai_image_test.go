@@ -754,3 +754,22 @@ func serverURL(r *http.Request) string {
 	}
 	return value
 }
+
+func TestOpenAIImageModelMapping(t *testing.T) {
+	cases := map[string]string{
+		"gpt-image-2":            "gpt-5-3",
+		"GPT-IMAGE-2":            "gpt-5-3",
+		"gpt-image-2.5":          "auto",
+		"gpt-image-2.5-flare":    "auto",
+		"gpt-image-2.5-sunburst": "auto",
+		"codex-gpt-image-2":      "codex-gpt-image-2",
+		"plus-codex-gpt-image-2": "codex-gpt-image-2",
+		"other":                  "other",
+	}
+	for in, expected := range cases {
+		actual := openAIImageModel(in)
+		if actual != expected {
+			t.Fatalf("openAIImageModel(%q) = %q, expected %q", in, actual, expected)
+		}
+	}
+}

@@ -1,14 +1,13 @@
 <template>
   <article
-    class="ui-card flex h-full flex-col gap-4 transition-all"
-    :class="[rowClass(item), selected ? 'ring-2 ring-primary/30' : 'hover:border-primary/30']"
-    v-memo="[signature, detailSignature, selected, refreshing, resetting]"
+    class="ui-card flex h-full flex-col gap-4 transition-colors"
+    :class="accountSurfaceClass(item, selected, 'card')"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-3">
         <Checkbox
           :model-value="selected"
-          :disabled="item.is_demo"
+          :aria-label="`选择账号 ${accountPrimaryText(item)}`"
           @update:model-value="emit('toggle-select', item.id, $event)"
         />
         <div class="min-w-0">
@@ -18,7 +17,7 @@
       </div>
       <StatusDetailPill
         :label="statusText(item)"
-        :tone-class="`${statusClass(item)} border-border`"
+        :tone="item.status_tone"
         title="状态详情"
         detail-label="状态说明"
         raw-error-label="原始报错"
@@ -29,24 +28,13 @@
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <StatusPill
-        :label="accountSourceText(item)"
-        tone-class="border-cyan-500/40 bg-cyan-500/10 text-cyan-600"
+      <MetaChip tone="info">
+        {{ accountSourceText(item) }}
+      </MetaChip>
+      <AccountCredentialStatus
+        :item="item"
+        @copy-credential="emit('copy-credential', item, $event)"
       />
-      <button
-        type="button"
-        class="text-left"
-        title="点击复制完整 Token"
-        @click="emit('copy-token', item)"
-      >
-        <StatusPill
-          :label="accountTokenPreview(item)"
-          tone-class="border-muted bg-muted/20 text-muted-foreground"
-          title="Access Token"
-          detail="点击复制完整 Token"
-          card-class="w-48"
-        />
-      </button>
     </div>
 
     <KeyValueList
@@ -57,35 +45,31 @@
     <AccountActionButtons
       class="mt-auto"
       :item="item"
-      :refreshing="refreshing"
-      :resetting="resetting"
+      :syncing="syncing"
+      :refreshing-access-token="refreshingAccessToken"
+      :busy="busy"
       @edit="emit('edit', item)"
+      @test="emit('test', item)"
       @toggle-enabled="emit('toggle-enabled', item)"
-      @refresh-token="emit('refresh-token', item.id)"
-      @reset-state="emit('reset-state', item.id)"
-      @copy-final-checkout-link="emit('copy-final-checkout-link', item)"
-      @open-final-checkout-link="emit('open-final-checkout-link', item)"
-      @remove="emit('remove', item.id)"
+      @sync-account="emit('sync-account', item)"
+      @refresh-access-token="emit('refresh-access-token', item)"
+      @remove="emit('remove', item)"
     />
   </article>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { Checkbox, KeyValueList, StatusDetailPill, StatusPill } from 'nanocat-ui'
+import { Checkbox, KeyValueList, MetaChip, StatusDetailPill } from 'nanocat-ui'
 
 import AccountActionButtons from '@/components/ai/AccountActionButtons.vue'
 import type { Account } from '@/api/accounts'
+import AccountCredentialStatus from './AccountCredentialStatus.vue'
 import {
   accountDetailItems,
   accountPrimaryText,
-  accountRowSignature,
   accountSecondaryText,
   accountSourceText,
-  accountTokenPreview,
-  boundedSignatureText,
-  rowClass,
-  statusClass,
+  accountSurfaceClass,
   statusRawError,
   statusText,
 } from './viewUtils'
@@ -93,28 +77,26 @@ import {
 const props = withDefaults(defineProps<{
   item: Account
   selected: boolean
-  refreshing?: boolean
-  resetting?: boolean
+  syncing?: boolean
+  refreshingAccessToken?: boolean
+  busy?: boolean
   statusDetailCardClass?: string
   statusDetailText: (item: Account) => string
 }>(), {
-  refreshing: false,
-  resetting: false,
+  syncing: false,
+  refreshingAccessToken: false,
+  busy: false,
   statusDetailCardClass: '',
 })
 
-const signature = computed(() => accountRowSignature(props.item))
-const detailSignature = computed(() => boundedSignatureText(props.statusDetailText(props.item)))
-
 const emit = defineEmits<{
   (e: 'toggle-select', id: string, checked: unknown): void
-  (e: 'copy-token', item: Account): void
+  (e: 'copy-credential', item: Account, kind: 'access' | 'refresh'): void
   (e: 'edit', item: Account): void
+  (e: 'test', item: Account): void
   (e: 'toggle-enabled', item: Account): void
-  (e: 'refresh-token', id: string): void
-  (e: 'reset-state', id: string): void
-  (e: 'copy-final-checkout-link', item: Account): void
-  (e: 'open-final-checkout-link', item: Account): void
-  (e: 'remove', id: string): void
+  (e: 'sync-account', item: Account): void
+  (e: 'refresh-access-token', item: Account): void
+  (e: 'remove', item: Account): void
 }>()
 </script>

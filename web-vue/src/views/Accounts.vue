@@ -1,23 +1,19 @@
 <template>
-  <div class="relative space-y-8">
-    <div class="flex items-center justify-between gap-3">
-      <ConsoleSegmentedTabs
-        :model-value="activeAccountPlatform"
-        :options="accountPlatformOptions"
-        fit="content"
-        aria-label="账号平台"
-        @update:model-value="setActiveAccountPlatform(String($event))"
-      />
-    </div>
-
-    <PagePanel v-if="activeAccountPlatform === 'gpt'" class="space-y-5">
+  <div
+    class="accounts-page relative"
+    :class="{ 'lg:flex lg:min-h-0 lg:flex-1 lg:flex-col': isWorkspaceLayout }"
+  >
+    <PagePanel
+      class="accounts-panel flex flex-col gap-5"
+      :class="{ 'min-h-0 flex-1': isWorkspaceLayout }"
+    >
       <div class="accounts-toolbar">
         <div class="accounts-toolbar-row accounts-toolbar-row-main">
           <FilterToolbar class="accounts-toolbar-filters" :bordered="false">
             <Input
               :model-value="keyword"
               type="text"
-              placeholder="搜索账号 ID / 邮箱 / Token / 类型 / 来源"
+              placeholder="搜索账号 ID / 邮箱 / Token / 套餐 / 来源"
               block
               root-class="min-w-[14rem] flex-1 md:max-w-sm"
               @update:model-value="keyword = $event.trim()"
@@ -38,14 +34,20 @@
             />
           </FilterToolbar>
 
-          <div class="accounts-toolbar-summary">
-            <AccountSelectionSummary
-              :all-selected="allVisibleSelected"
-              :total-count="accountListTotal"
-              :selected-count="selectedCount"
-              :view-mode="viewMode"
-              @toggle-all="toggleSelectAllVisible"
-              @update:view-mode="setViewMode"
+          <div class="accounts-toolbar-view">
+            <Checkbox
+              v-if="viewMode === 'cards'"
+              :model-value="allVisibleSelected"
+              :indeterminate="someVisibleSelected"
+              @update:model-value="toggleSelectAllVisible"
+            >
+              全选本页
+            </Checkbox>
+            <ViewModeSwitch
+              :model-value="viewMode"
+              list-label="列表视图"
+              cards-label="卡片视图"
+              @update:model-value="setViewMode"
             />
           </div>
         </div>
@@ -65,7 +67,7 @@
               <FloatingActionMenu
                 label="导入 / 添加"
                 :items="accountEntryItems"
-                :disabled="importBusy"
+                :disabled="importBusy || batchBusy || accountOperationBusy"
                 align="left"
                 :trigger-class="accountToolbarMenuClass"
                 @select="handleAccountEntryAction"
@@ -79,12 +81,12 @@
                 @select="handleExportAction"
               />
               <FloatingActionMenu
-                label="批量操作"
-                :items="toolbarBatchMenuItems"
-                :disabled="batchBusy"
+                :label="batchMenuLabel"
+                :items="batchMenuItems"
+                :disabled="batchBusy || accountOperationBusy || accountAllTotal === 0"
                 align="left"
                 :trigger-class="accountToolbarMenuClass"
-                @select="handleToolbarBatchAction"
+                @select="handleBatchAction"
               />
             </FilterToolbar>
           </div>
@@ -94,7 +96,7 @@
               size="sm"
               variant="outline"
               :root-class="accountToolbarSecondaryClass"
-              :disabled="loading || batchBusy"
+              :disabled="loading"
               @click="loadData"
             >
               刷新列表
@@ -104,91 +106,105 @@
       </div>
 
       <PageLoadingState
-        v-if="loading && filteredAccounts.length === 0"
+        v-if="viewMode === 'cards' && loading && visibleAccounts.length === 0"
         title="正在加载账号"
         description="读取账号列表、分组和分页状态。"
       />
 
-      <TableShell v-else-if="viewMode === 'list'">
-        <table class="min-w-[1080px] w-full text-left text-sm">
-          <thead class="text-xs uppercase tracking-[0.16em] text-muted-foreground">
-            <tr>
-              <th class="w-12 py-3 pr-4">
+      <TableShell
+        v-else-if="viewMode === 'list'"
+        :scroll-mode="isWorkspaceLayout ? 'contained' : 'page'"
+        sticky-header
+        unframed
+        :loading="loading && visibleAccounts.length === 0"
+        loading-title="正在加载账号"
+        loading-description="读取账号列表、分组和分页状态。"
+        :show-empty="!loading && visibleAccounts.length === 0"
+        :empty-colspan="10"
+        :scroll-class="isWorkspaceLayout ? 'max-h-[min(36rem,60dvh)] lg:max-h-none' : ''"
+        table-class="min-w-[980px] w-full"
+        head-class="tracking-[0.16em]"
+      >
+        <template #head>
+          <tr>
+              <th class="w-12 py-2.5 pr-4">
                 <Checkbox
                   :model-value="allVisibleSelected"
+                  :indeterminate="someVisibleSelected"
                   @update:model-value="toggleSelectAllVisible"
-                />
+                >
+                  <span class="sr-only">全选当前页账号</span>
+                </Checkbox>
               </th>
-              <th class="py-3 pr-5">TOKEN</th>
-              <th class="py-3 pr-5">类型 / 来源</th>
-              <th class="py-3 pr-5">状态</th>
-              <th class="py-3 pr-5">账户信息</th>
-              <th class="py-3 pr-5">创建时间</th>
-              <th class="py-3 pr-5">图片额度</th>
-              <th class="py-3 pr-5">恢复时间</th>
-              <th class="py-3 pr-5">成功 / 失败</th>
-              <th class="py-3 text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody class="text-sm text-foreground">
-            <tr v-if="!loading && filteredAccounts.length === 0">
-              <td colspan="10" class="py-6">
+              <th class="py-2.5 pr-5">AT / RT</th>
+              <th class="py-2.5 pr-5">来源 / 套餐</th>
+              <th class="py-2.5 pr-5">状态</th>
+              <th class="py-2.5 pr-5">账户信息</th>
+              <th class="py-2.5 pr-5">创建时间</th>
+              <th class="py-2.5 pr-5">图片额度</th>
+              <th class="py-2.5 pr-5">恢复时间</th>
+              <th class="py-2.5 pr-5">成功 / 失败</th>
+              <th class="py-2.5 pr-3 text-right">操作</th>
+          </tr>
+        </template>
+        <template #empty>
                 <EmptyState
                   plain
                   title="暂无账号数据"
-                  description="可以先用 OAuth 登录已有账号，也可以导入 Access Token、Session JSON 或 CPA JSON 文件。"
+                  description="可以先用 OAuth 登录已有账号，也可以导入 Access Token、Session JSON 或账号 JSON 文件。"
                 />
-              </td>
-            </tr>
-            <AccountTableRow
-              v-for="item in pagedAccounts"
+        </template>
+        <AccountTableRow
+              v-for="item in visibleAccounts"
               :key="item.id"
               :item="item"
               :selected="isSelected(item.id)"
-              :refreshing="refreshingAccountId === item.id"
-              :resetting="resettingAccountId === item.id"
+              :syncing="syncingAccountIds.has(item.id)"
+              :refreshing-access-token="refreshingAccessTokenAccountIds.has(item.id)"
+              :busy="batchBusy || accountOperationBusy"
               :status-detail-card-class="accountStatusDetailCardClass"
               :status-detail-text="accountStatusDetailText"
               @toggle-select="toggleSelect"
-              @copy-token="copyAccountToken"
+              @copy-credential="copyAccountCredential"
               @edit="openEditModal"
+              @test="openAccountTest"
               @toggle-enabled="toggleEnabled"
-              @refresh-token="refreshToken"
-              @reset-state="resetAccountState"
-              @copy-final-checkout-link="copyFinalCheckoutLink"
-              @open-final-checkout-link="openFinalCheckoutLink"
+              @sync-account="syncAccount"
+              @refresh-access-token="refreshAccessToken"
               @remove="removeAccount"
             />
-          </tbody>
-        </table>
       </TableShell>
 
-      <div v-else class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <div v-if="!loading && filteredAccounts.length === 0" class="col-span-full">
+      <div
+        v-else
+        class="accounts-card-results scrollbar-slim grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3"
+        :class="isWorkspaceLayout ? 'accounts-card-results--contained min-h-0 flex-1 overflow-y-auto' : ''"
+      >
+        <div v-if="!loading && visibleAccounts.length === 0" class="col-span-full">
           <EmptyState
             plain
             title="暂无账号数据"
-            description="可以先用 OAuth 登录已有账号，也可以导入 Access Token、Session JSON 或 CPA JSON 文件。"
+            description="可以先用 OAuth 登录已有账号，也可以导入 Access Token、Session JSON 或账号 JSON 文件。"
           />
         </div>
 
         <AccountGridCard
-          v-for="item in pagedAccounts"
+          v-for="item in visibleAccounts"
           :key="`${item.id}-card`"
           :item="item"
           :selected="isSelected(item.id)"
-          :refreshing="refreshingAccountId === item.id"
-          :resetting="resettingAccountId === item.id"
+          :syncing="syncingAccountIds.has(item.id)"
+          :refreshing-access-token="refreshingAccessTokenAccountIds.has(item.id)"
+          :busy="batchBusy || accountOperationBusy"
           :status-detail-card-class="accountStatusDetailCardClass"
           :status-detail-text="accountStatusDetailText"
           @toggle-select="toggleSelect"
-          @copy-token="copyAccountToken"
+          @copy-credential="copyAccountCredential"
           @edit="openEditModal"
+          @test="openAccountTest"
           @toggle-enabled="toggleEnabled"
-          @refresh-token="refreshToken"
-          @reset-state="resetAccountState"
-          @copy-final-checkout-link="copyFinalCheckoutLink"
-          @open-final-checkout-link="openFinalCheckoutLink"
+          @sync-account="syncAccount"
+          @refresh-access-token="refreshAccessToken"
           @remove="removeAccount"
         />
       </div>
@@ -196,410 +212,111 @@
       <ListPagination
         v-model:page="currentPage"
         v-model:page-size="pageSize"
+        v-model:layout-mode="listLayoutMode"
         :total-count="accountListTotal"
         :page-size-options="pageSizeOptions"
         unit="个账号"
         :disabled="loading"
-      />
-    </PagePanel>
-
-    <PagePanel v-else class="space-y-5">
-      <MetricStrip
-        :items="grokMetricItems"
-        columns-class="grid-cols-2 md:grid-cols-3 xl:grid-cols-4"
-        density="compact"
-      />
-      <SurfaceBox
-        v-if="grokRuntimeError"
-        tone="muted"
-        density="compact"
-        wrap
       >
-        Grok 运行时数据暂不可用：{{ grokRuntimeError }}
-      </SurfaceBox>
-
-      <div class="accounts-toolbar">
-        <div class="accounts-toolbar-row accounts-toolbar-row-main">
-          <FilterToolbar class="accounts-toolbar-filters" :bordered="false">
-            <Input
-              :model-value="grokKeyword"
-              type="text"
-              placeholder="搜索 Grok 账号 ID / 邮箱 / 来源 / 状态"
-              block
-              root-class="min-w-[14rem] flex-1 md:max-w-sm"
-              @update:model-value="grokKeyword = $event.trim()"
-            />
-            <GroupedSelectMenu
-              v-model="grokStatusFilter"
-              :options="grokStatusFilterOptions"
-              placeholder="状态筛选"
-              selected-indicator="none"
-              aria-label="Grok 账号状态筛选"
-            />
-          </FilterToolbar>
-
-          <div class="accounts-toolbar-summary">
-            <AccountSelectionSummary
-              :all-selected="grokAllVisibleSelected"
-              :total-count="grokAccountListTotal"
-              :selected-count="grokSelectedCount"
-              :view-mode="grokViewMode"
-              @toggle-all="toggleSelectAllVisibleGrokAccounts"
-              @update:view-mode="setGrokViewMode"
-            />
-          </div>
-        </div>
-
-        <div class="accounts-toolbar-row accounts-toolbar-row-actions">
-          <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-ops" :bordered="false" gap="tight">
-            <Button
-              size="sm"
-              variant="outline"
-              :root-class="accountToolbarSecondaryClass"
-              :disabled="Boolean(grokOAuthRowAction.accountId)"
-              @click="showGrokOAuthAccess = true"
-            >
-              OAuth 接入 ({{ grokOAuthTotal }})
-            </Button>
-            <FloatingActionMenu
-              label="导出"
-              :items="grokExportMenuItems"
-              :disabled="grokExportBusy || grokAccountAllTotal === 0"
-              align="left"
-              :trigger-class="accountToolbarMenuClass"
-              @select="handleGrokExportAction"
-            />
-          </FilterToolbar>
-
-          <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-refresh" :bordered="false" gap="tight">
-            <Button
-              size="sm"
-              :variant="grokProbePollingEnabled ? 'outline' : 'primary'"
-              :root-class="accountToolbarButtonClass"
-              :disabled="grokProbePollingBusy"
-              :title="grokProbePollingEnabled ? '关闭 Grok 定时轮询' : '开启 Grok 定时轮询'"
-              @click="toggleGrokProbePolling"
-            >
-              <Icon
-                :icon="grokProbePollingBusy ? 'lucide:loader-circle' : grokProbePollingEnabled ? 'lucide:circle-pause' : 'lucide:circle-play'"
-                class="h-3.5 w-3.5"
-                :class="{ 'animate-spin': grokProbePollingBusy }"
-              />
-              {{ grokProbePollingBusy ? '更新中...' : grokProbePollingEnabled ? '关闭轮询' : '开启轮询' }}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              :root-class="accountToolbarSecondaryClass"
-              :disabled="grokLoading"
-              @click="loadGrokAccounts"
-            >
-              刷新列表
-            </Button>
-          </FilterToolbar>
-        </div>
-      </div>
-
-      <PageLoadingState
-        v-if="grokLoading && grokAccounts.length === 0"
-        title="正在加载 Grok 账号"
-        description="读取注册账号、登录态和分页状态。"
-      />
-
-      <TableShell v-else-if="grokViewMode === 'list'">
-        <table class="min-w-[1700px] w-full table-fixed text-left text-sm">
-          <thead class="text-xs font-medium text-muted-foreground">
-            <tr>
-              <th class="w-12 py-3 pr-4">
-                <Checkbox
-                  :model-value="grokAllVisibleSelected"
-                  @update:model-value="toggleSelectAllVisibleGrokAccounts"
-                />
-              </th>
-              <th class="w-[12rem] py-3 pr-5">账号 / TOKEN</th>
-              <th class="w-[5.5rem] py-3 pr-5">账号类型</th>
-              <th class="w-[5.5rem] py-3 pr-5">注册状态</th>
-              <th class="w-[8rem] py-3 pr-5">SSO 状态</th>
-              <th class="w-[11rem] py-3 pr-5">SSO 额度 A / F / E / H / C</th>
-              <th class="w-[8.5rem] py-3 pr-5">OAuth 状态</th>
-              <th class="w-[13rem] py-3 pr-5">OAuth 剩余 / 重置</th>
-              <th class="w-[7rem] py-3 pr-5">恢复时间</th>
-              <th class="w-[9rem] py-3 pr-5">成功 / 失败</th>
-              <th class="w-[8rem] py-3 pr-5">最近使用</th>
-              <th class="w-[16rem] py-3 text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody class="text-sm text-foreground">
-            <tr v-if="!grokLoading && grokAccounts.length === 0">
-              <td colspan="12" class="py-6">
-                <EmptyState
-                  plain
-                  title="暂无 Grok 账号"
-                  description="Grok 纯协议注册成功后，账号会自动进入这里。"
-                />
-              </td>
-            </tr>
-            <GrokAccountTableRow
-              v-for="item in grokAccounts"
-              :key="item.id"
-              :item="item"
-              :selected="isGrokAccountSelected(item.id)"
-              :runtime-available="grokRuntimeAvailable"
-              :busy="grokBatchBusy"
-              :syncing="grokSyncingAccountId === item.id"
-              :refreshing="grokRefreshingAccountId === item.id"
-              :testing="grokTestingAccountId === item.id"
-              :chatting="grokChattingAccountId === item.id"
-              :toggling="grokTogglingAccountId === item.id"
-              :deleting="grokRemovingAccountId === item.id"
-              :authorizing="grokAuthorizingAccountId === item.id"
-              :oauth-action="grokOAuthActionFor(item)"
-              @toggle-select="toggleGrokAccountSelection"
-              @credentials="openGrokLoginCredentials"
-              @sync="syncGrokAccount"
-              @refresh="refreshGrokAccount"
-              @test="testGrokAccount"
-              @chat="openGrokConversationTest"
-              @toggle-disabled="toggleGrokAccountDisabled"
-              @remove="removeGrokAccount"
-              @oauth-sync="syncGrokOAuthAccount"
-              @oauth-authorize="authorizeGrokOAuthAccount"
-              @oauth-refresh="refreshGrokOAuthAccount"
-              @oauth-toggle="toggleGrokOAuthAccount"
-              @oauth-remove="removeGrokOAuthAccount"
-            />
-          </tbody>
-        </table>
-      </TableShell>
-
-      <div v-else class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <div v-if="!grokLoading && grokAccounts.length === 0" class="col-span-full">
-          <EmptyState
-            plain
-            title="暂无 Grok 账号"
-            description="Grok 纯协议注册成功后，账号会自动进入这里。"
-          />
-        </div>
-
-        <GrokAccountGridCard
-          v-for="item in grokAccounts"
-          :key="`${item.id}-grok-card`"
-          :item="item"
-          :selected="isGrokAccountSelected(item.id)"
-          :runtime-available="grokRuntimeAvailable"
-          :busy="grokBatchBusy"
-          :syncing="grokSyncingAccountId === item.id"
-          :refreshing="grokRefreshingAccountId === item.id"
-          :testing="grokTestingAccountId === item.id"
-          :chatting="grokChattingAccountId === item.id"
-          :toggling="grokTogglingAccountId === item.id"
-          :deleting="grokRemovingAccountId === item.id"
-          :authorizing="grokAuthorizingAccountId === item.id"
-          :oauth-action="grokOAuthActionFor(item)"
-          @toggle-select="toggleGrokAccountSelection"
-          @credentials="openGrokLoginCredentials"
-          @sync="syncGrokAccount"
-          @refresh="refreshGrokAccount"
-          @test="testGrokAccount"
-          @chat="openGrokConversationTest"
-          @toggle-disabled="toggleGrokAccountDisabled"
-          @remove="removeGrokAccount"
-          @oauth-sync="syncGrokOAuthAccount"
-          @oauth-authorize="authorizeGrokOAuthAccount"
-          @oauth-refresh="refreshGrokOAuthAccount"
-          @oauth-toggle="toggleGrokOAuthAccount"
-          @oauth-remove="removeGrokOAuthAccount"
-        />
-      </div>
-
-      <ListPagination
-        v-model:page="grokCurrentPage"
-        v-model:page-size="grokPageSize"
-        :total-count="grokAccountListTotal"
-        :page-size-options="grokPageSizeOptions"
-        unit="个 Grok 账号"
-        :disabled="grokLoading"
-      />
+        <template #summary="{ visibleCount, totalCount, unit }">
+          <span>当前展示 {{ visibleCount }} / {{ totalCount }} {{ unit }}</span>
+        </template>
+      </ListPagination>
     </PagePanel>
 
-    <AccountBulkBar
-      v-if="activeAccountPlatform === 'gpt'"
-      :selected-count="selectedCount"
-      :busy="batchBusy"
-      :busy-label="batchActionLabel"
-      :items="batchMenuItems"
-      @select="handleBatchAction"
-      @clear="clearSelection"
+    <AccountTestModal
+      :open="showAccountTestModal"
+      :account="accountTestAccount"
+      :mode="accountTestMode"
+      :model="accountTestModel"
+      :prompt="accountTestPrompt"
+      :model-options="accountTestModelOptions"
+      :model-catalog-loading="accountTestModelCatalogLoading"
+      :running="accountTestRunning"
+      :result="accountTestResult"
+      @close="closeAccountTest"
+      @run="runAccountTest"
+      @update:mode="setAccountTestMode"
+      @update:model="accountTestModel = $event"
+      @update:prompt="accountTestPrompt = $event"
     />
 
-    <AccountBulkBar
-      v-if="activeAccountPlatform === 'grok'"
-      :selected-count="grokSelectedCount"
-      :busy="grokBatchBusy"
-      :busy-label="grokBatchActionLabel"
-      :items="grokBatchMenuItems"
-      @select="runGrokBulkAction"
-      @clear="clearGrokSelection"
-    />
-
-    <GrokLoginCredentialsModal
-      :open="Boolean(grokCredentialsAccount)"
-      :account="grokCredentialsAccount"
-      @close="grokCredentialsAccount = null"
-    />
-
-    <GrokAccountConversationTestModal
-      :open="Boolean(grokConversationAccount)"
-      :account="grokConversationAccount"
-      @close="closeGrokConversationTest"
-      @running="setGrokConversationRunning"
-    />
-
-    <GrokOAuthAccountsPanel
-      ref="grokOAuthPanelRef"
-      :open="activeAccountPlatform === 'grok' && showGrokOAuthAccess"
-      @close="showGrokOAuthAccess = false"
-      @changed="handleGrokOAuthChanged"
-    />
-
-    <ModalShell :open="activeAccountPlatform === 'gpt' && showModal" max-width="44rem" :z-index="120">
-            <ModalHeader :title="editingId ? '编辑账号' : '添加账号'" :bordered="false" compact @close="closeModal" />
+    <ModalShell
+      :open="showModal"
+      :aria-label="editingId ? '编辑账号' : '添加账号'"
+      :z-index="120"
+    >
+            <ModalHeader
+              :title="editingId ? '编辑账号' : '添加账号'"
+              :bordered="false"
+              :close-disabled="saving"
+              compact
+              @close="closeModal"
+        />
 
             <ModalBody density="compact" class="space-y-3">
-                <FormSection title="基础信息" surface="plain">
-                  <div class="grid grid-cols-1 gap-2.5 md:grid-cols-4">
-                    <label v-if="editingId" class="text-xs md:col-span-2">
-                      <span class="ui-field-label">账号 ID</span>
-                      <Input :model-value="form.id" disabled block />
+                <FormSection v-if="editingId" title="账号身份" surface="plain">
+                  <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+                    <label class="text-xs">
+                      <span class="ui-field-label">邮箱</span>
+                      <Input :model-value="form.email || '未获取'" disabled block />
                     </label>
                     <label class="text-xs">
-                      <span class="ui-field-label">类型</span>
-                      <Input
-                        :model-value="form.type"
-                        block
-                        placeholder="free / Plus / Pro"
-                        @update:model-value="form.type = $event.trim()"
-                      />
+                      <span class="ui-field-label">管理 ID</span>
+                      <Input :model-value="form.id" disabled block root-class="font-mono" />
                     </label>
-                    <div class="text-xs">
-                      <span class="ui-field-label">状态</span>
-                      <GroupedSelectMenu
-                        v-model="form.status"
-                        :options="accountStatusOptions"
-                        placeholder="状态"
-                        selected-indicator="none"
-                        aria-label="账号状态"
-                        block
-                      />
-                    </div>
                   </div>
                 </FormSection>
 
-                <FormSection surface="plain">
+                <FormSection title="账号凭据" surface="plain">
                   <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
-                    <label class="text-xs">
-                      <span class="ui-field-label">登录账号 / 邮箱</span>
-                      <Input v-model="form.email" block autocomplete="username" placeholder="name@example.com" />
-                    </label>
-                    <label class="text-xs">
-                      <span class="ui-field-label">账户 ID</span>
-                      <Input v-model="form.user_id" block placeholder="ChatGPT account / user ID" />
-                    </label>
-                    <label class="text-xs">
-                      <span class="ui-field-label">账户密码</span>
-                      <div class="flex gap-2">
-                        <Input
-                          v-model="form.login_password"
-                          :type="showLoginPassword ? 'text' : 'password'"
-                          block
-                          autocomplete="off"
-                          placeholder="没有则留空"
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          root-class="w-9 shrink-0 px-0"
-                          :disabled="!form.login_password"
-                          :title="showLoginPassword ? '隐藏账户密码' : '显示账户密码'"
-                          :aria-label="showLoginPassword ? '隐藏账户密码' : '显示账户密码'"
-                          @click="showLoginPassword = !showLoginPassword"
-                        >
-                          <Icon :icon="showLoginPassword ? 'lucide:eye-off' : 'lucide:eye'" class="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          root-class="shrink-0"
-                          :disabled="!form.login_password"
-                          title="复制账户密码"
-                          @click="copyCredential(form.login_password, '账户密码')"
-                        >
-                          <Icon icon="lucide:copy" class="h-3.5 w-3.5" />
-                          复制
-                        </Button>
-                      </div>
-                    </label>
-                    <label class="text-xs">
-                      <span class="ui-field-label">2FA Secret</span>
-                      <div class="flex gap-2">
-                        <Input
-                          v-model="form.two_factor_secret"
-                          :type="showTwoFactorSecret ? 'text' : 'password'"
-                          block
-                          autocomplete="off"
-                          placeholder="没有则留空"
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          root-class="w-9 shrink-0 px-0"
-                          :disabled="!form.two_factor_secret"
-                          :title="showTwoFactorSecret ? '隐藏 2FA Secret' : '显示 2FA Secret'"
-                          :aria-label="showTwoFactorSecret ? '隐藏 2FA Secret' : '显示 2FA Secret'"
-                          @click="showTwoFactorSecret = !showTwoFactorSecret"
-                        >
-                          <Icon :icon="showTwoFactorSecret ? 'lucide:eye-off' : 'lucide:eye'" class="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          root-class="shrink-0"
-                          :disabled="!form.two_factor_secret"
-                          title="复制 2FA Secret"
-                          @click="copyCredential(form.two_factor_secret, '2FA Secret')"
-                        >
-                          <Icon icon="lucide:copy" class="h-3.5 w-3.5" />
-                          复制
-                        </Button>
-                      </div>
-                    </label>
-                  </div>
-                  <label class="mt-2.5 block text-xs">
-                    <span class="ui-field-label">Access Token（必填）</span>
+                  <label class="block text-xs">
+                    <span class="ui-field-label">AT{{ editingId ? '' : '（必填）' }}</span>
                     <textarea
                       v-model.trim="form.access_token"
                       rows="3"
                       class="ui-textarea-sm font-mono"
-                      placeholder="粘贴完整 access token"
+                      :placeholder="editingId ? '留空表示不修改' : '粘贴完整 access token'"
+                      autocomplete="off"
+                      spellcheck="false"
                     ></textarea>
                   </label>
+                  <label class="block text-xs">
+                    <span class="ui-field-label">RT（可选）</span>
+                    <textarea
+                      v-model.trim="form.refresh_token"
+                      rows="3"
+                      class="ui-textarea-sm font-mono"
+                      :placeholder="editingId ? '留空表示不修改' : '粘贴 refresh token'"
+                      autocomplete="off"
+                      spellcheck="false"
+                    ></textarea>
+                  </label>
+                  </div>
                 </FormSection>
 
-                <FormSection title="调度属性" surface="plain">
-                  <div class="grid grid-cols-1 gap-2 md:grid-cols-3">
+                <FormSection title="账号设置" surface="plain">
+                  <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
                     <label class="text-xs">
-                      <span class="ui-field-label">来源</span>
+                      <span class="ui-field-label">套餐</span>
                       <Input
-                        :model-value="form.source_type"
+                        :model-value="form.type"
                         block
-                        placeholder="web / oauth_login / codex"
-                        @update:model-value="form.source_type = $event.trim()"
+                        placeholder="留空表示未知（Free / Plus / Pro）"
+                        @update:model-value="form.type = $event.trim()"
                       />
                     </label>
+                    <div class="text-xs">
+                      <span class="ui-field-label">来源</span>
+                      <GroupedSelectMenu
+                        v-model="form.source_type"
+                        :options="accountSourceOptions"
+                        placeholder="来源"
+                        selected-indicator="none"
+                        aria-label="账号来源"
+                        block
+                      />
+                    </div>
                     <label class="text-xs">
                       <span class="ui-field-label">图片额度</span>
                       <Input
@@ -621,7 +338,7 @@
                         block
                       />
                     </label>
-                    <div class="space-y-2 text-xs md:col-span-3">
+                    <div class="space-y-2 text-xs md:col-span-2">
                       <div class="grid grid-cols-1 gap-2 md:grid-cols-[11rem_minmax(0,1fr)]">
                         <label>
                           <span class="ui-field-label">代理模式</span>
@@ -705,7 +422,11 @@
             </ModalFooter>
     </ModalShell>
 
-    <ModalShell :open="activeAccountPlatform === 'gpt' && showAccountGroupsModal" max-width="58rem" :z-index="130">
+    <ModalShell
+      :open="showAccountGroupsModal"
+      aria-label="账号组管理"
+      :z-index="130"
+    >
             <ModalHeader
               title="账号组管理"
               subtitle="先创建账号组，再在账号列表勾选账号批量绑定。"
@@ -843,17 +564,21 @@
             </div>
     </ModalShell>
 
-    <ModalShell :open="activeAccountPlatform === 'gpt' && showImportModal" max-width="58rem" :z-index="120">
+    <ModalShell
+      :open="showImportModal"
+      aria-label="导入账号"
+      :z-index="120"
+    >
             <ModalHeader title="导入账号" :close-disabled="importModalBusy" compact @close="closeImportModal" />
 
             <div class="grid grid-cols-1 gap-0 md:grid-cols-[15rem_1fr]">
-              <div class="border-b border-border bg-muted/20 p-3 md:border-b-0 md:border-r">
+              <div class="flex flex-col border-b border-border bg-muted/20 p-3 md:border-b-0 md:border-r">
                 <div class="space-y-1">
                   <button
                     v-for="option in importModeOptions"
                     :key="option.value"
                     type="button"
-                    class="w-full rounded-xl px-3 py-2 text-left text-sm transition-colors"
+                    class="min-h-10 w-full rounded-full px-4 py-2 text-left text-sm transition-colors"
                     :class="importMode === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-card hover:text-foreground'"
                     :disabled="importModalBusy"
                     @click="setImportMode(option.value)"
@@ -861,13 +586,20 @@
                     {{ option.label }}
                   </button>
                 </div>
+                <AccountImportTargetGroupField
+                  v-model="importTargetGroupValue"
+                  class="mt-3 border-t border-border pt-3"
+                  :groups="accountGroups"
+                  :loading="accountGroupsLoading"
+                  :disabled="importModalBusy"
+                />
               </div>
 
-              <div class="min-h-[26rem] p-4">
+              <div class="min-h-[clamp(26rem,55vh,42rem)] p-4">
                 <div v-if="importMode === 'oauth_login'" class="space-y-3">
                   <ImportModePanel
-                    title="OAuth 登录已有账号（带自动刷新）"
-                    description="用浏览器登录自己的 ChatGPT 账号，回填 callback URL 后导入 refresh_token。"
+                    title="OAuth 登录已有账号"
+                    description="用浏览器登录 ChatGPT，回填 callback URL 后保存 RT，用于 AT 临期自动续期。"
                   />
                   <div class="grid grid-cols-1 gap-3">
                     <label class="block text-xs">
@@ -945,10 +677,19 @@
                 </div>
 
                 <div v-else-if="importMode === 'session_json'" class="space-y-3">
-                  <ImportModePanel
-                    title="导入 Session JSON"
-                    description="从 chatgpt.com 的 session 接口复制完整 JSON，自动提取 accessToken。"
-                  />
+                  <ImportModePanel title="导入 Session JSON">
+                    <template #description>
+                      <p class="mt-1 text-xs leading-6 text-muted-foreground">
+                        打开
+                        <a
+                          href="https://chatgpt.com/api/auth/session"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="font-medium text-primary underline decoration-primary/35 underline-offset-2 hover:decoration-primary"
+                        >https://chatgpt.com/api/auth/session</a>，复制完整 JSON，系统会保留其中的 AT、RT 和 ID Token；该接口通常不包含长期 RT。
+                      </p>
+                    </template>
+                  </ImportModePanel>
                   <textarea v-model.trim="sessionJsonText" rows="12" class="ui-textarea-sm font-mono" placeholder="粘贴完整 session JSON"></textarea>
                   <div class="flex justify-end">
                     <Button size="xs" variant="primary" :disabled="importBusy || !sessionJsonText.trim()" @click="importSessionJson">
@@ -957,14 +698,28 @@
                   </div>
                 </div>
 
-                <div v-else-if="importMode === 'cpa_json'" class="space-y-3">
+                <div v-else-if="importMode === 'backup_json'" class="space-y-3">
                   <ImportModePanel
-                    title="导入 CPA JSON 文件"
-                    description="支持一次多选多个本地 JSON 文件，逐个读取对象里的 access_token 后导入。"
+                    title="导入完整备份文件"
+                    description="读取本系统导出的完整账号 JSON，直接恢复已保存的凭据和账号配置，不请求远程接口验证。"
                   />
                   <StateBlock dashed compact>
-                    <Button size="sm" variant="outline" :disabled="importBusy" @click="openCPAFileDialog">
-                      选择 CPA JSON 文件
+                    <Button size="sm" variant="outline" :disabled="importBusy" @click="openAccountFileDialog">
+                      选择备份 JSON 文件
+                    </Button>
+                  </StateBlock>
+                </div>
+
+                <div v-else-if="importMode === 'cpa_json' || importMode === 'sub2api_json'" class="space-y-3">
+                  <ImportModePanel
+                    :title="importMode === 'sub2api_json' ? '导入 Sub2API JSON 文件' : '导入 CPA JSON 文件'"
+                    :description="importMode === 'sub2api_json'
+                      ? '读取 Sub2API 导出的 JSON 文件，提取账号凭据并同步账号信息与额度。'
+                      : '从一个或多个 CPA JSON 文件提取账号凭据，并请求远程接口验证、同步账号信息与额度。'"
+                  />
+                  <StateBlock dashed compact>
+                    <Button size="sm" variant="outline" :disabled="importBusy" @click="openAccountFileDialog">
+                      选择 {{ importMode === 'sub2api_json' ? 'Sub2API' : 'CPA' }} JSON 文件
                     </Button>
                   </StateBlock>
                 </div>
@@ -972,160 +727,99 @@
                 <div v-else-if="importMode === 'remote_cpa'" class="space-y-3">
                   <RemoteAccountImportPanel
                     mode="cpa"
+                    external-tracking
+                    :target-group-id="resolvedImportTargetGroupId"
                     @busy-change="remoteImportBusy = $event"
-                    @imported="handleRemoteImportDone"
+                    @progress="updateRemoteImportProgress"
+                    @started="startRemoteImportTracking"
                   />
                 </div>
 
                 <div v-else-if="importMode === 'sub2api'" class="space-y-3">
                   <RemoteAccountImportPanel
                     mode="sub2api"
+                    external-tracking
+                    :target-group-id="resolvedImportTargetGroupId"
                     @busy-change="remoteImportBusy = $event"
-                    @imported="handleRemoteImportDone"
+                    @progress="updateRemoteImportProgress"
+                    @started="startRemoteImportTracking"
                   />
                 </div>
               </div>
             </div>
     </ModalShell>
 
-    <ModalShell :open="activeAccountPlatform === 'gpt' && showRefreshProgress" max-width="34rem" :z-index="140">
-          <ModalHeader
-            :title="refreshProgressTitle || '刷新账号信息和额度'"
-            :close-disabled="batchBusy && !refreshProgress?.done"
-            compact
-            @close="closeRefreshProgress"
-          >
-            <template #actions>
-              <Button
-                v-if="canStopRefreshProgress"
-                size="xs"
-                variant="outline"
-                root-class="min-w-14 justify-center text-amber-600"
-                :disabled="bulkStopRequested"
-                @click="requestStopRefreshProgress"
-              >
-                {{ bulkStopRequested ? '停止中...' : '停止' }}
-              </Button>
-            </template>
-          </ModalHeader>
-          <div class="space-y-4 px-5 py-4">
-            <div class="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{{ refreshProgress?.processed || 0 }} / {{ refreshProgress?.total || 0 }}</span>
-              <span>{{ refreshProgressPercent }}%</span>
-            </div>
-            <ProgressBar :value="refreshProgressPercent" aria-label="账号刷新进度" />
-            <MetricStrip :items="refreshProgressItems" columns-class="grid-cols-2" density="compact" />
-            <SurfaceBox v-if="refreshProgress?.error" tag="p" tone="danger" density="compact">
-              {{ refreshProgress.error }}
-            </SurfaceBox>
-          </div>
-    </ModalShell>
+    <AccountOperationDrawer
+      :open="showRefreshProgress"
+      :title="refreshProgressTitle"
+      :status-text="refreshProgressStatusText"
+      :progress="refreshProgress"
+      :percent="refreshProgressPercent"
+      :events="accountOperationEvents"
+      :can-stop="canStopRefreshProgress"
+      :stop-requested="bulkStopRequested"
+      :can-close="canCloseRefreshProgress"
+      @stop="requestStopRefreshProgress"
+      @close="closeRefreshProgress"
+    />
 
     <input ref="manualTokenFileInputRef" type="file" accept=".txt,text/plain" class="hidden" @change="handleManualTokenFileChange" />
-    <input ref="cpaFileInputRef" type="file" accept=".json,application/json" multiple class="hidden" @change="handleCPAFileChange" />
+    <input ref="accountFileInputRef" type="file" accept=".json,application/json" multiple class="hidden" @change="handleAccountFileChange" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { Icon } from '@iconify/vue'
-import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
-import AccountBulkBar from '@/components/ai/AccountBulkBar.vue'
-import AccountSelectionSummary from '@/components/ai/AccountSelectionSummary.vue'
-import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
+import { Button, Checkbox, EmptyState, GroupedSelectMenu, Input, TableShell, ViewModeSwitch } from 'nanocat-ui'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
 import FloatingActionMenu from '@/components/ai/FloatingActionMenu.vue'
 import FormSection from '@/components/ai/FormSection.vue'
 import ImportModePanel from '@/components/ai/ImportModePanel.vue'
 import InfoCard from '@/components/ai/InfoCard.vue'
 import ListPagination from '@/components/ai/ListPagination.vue'
-import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
-import ProgressBar from '@/components/ai/ProgressBar.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
-import TableShell from '@/components/ai/TableShell.vue'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Account } from '@/api/accounts'
-import type { GrokOAuthAccount } from '@/api/grokOAuthAccounts'
-import {
-  grokAccountsApi,
-  type GrokAccount,
-  type GrokQuotaMode,
-} from '@/api/grokAccounts'
 import AccountGridCard from './accounts/AccountGridCard.vue'
+import AccountImportTargetGroupField from './accounts/AccountImportTargetGroupField.vue'
+import AccountOperationDrawer from './accounts/AccountOperationDrawer.vue'
+import AccountTestModal from './accounts/AccountTestModal.vue'
 import AccountTableRow from './accounts/AccountTableRow.vue'
-import GrokAccountConversationTestModal from './accounts/GrokAccountConversationTestModal.vue'
-import GrokAccountGridCard from './accounts/GrokAccountGridCard.vue'
-import GrokAccountTableRow from './accounts/GrokAccountTableRow.vue'
-import GrokLoginCredentialsModal from './accounts/GrokLoginCredentialsModal.vue'
-import GrokOAuthAccountsPanel from './accounts/GrokOAuthAccountsPanel.vue'
 import { useAccountsPage } from './accounts/useAccountsPage'
+import { useListLayoutPreference } from '@/composables/useListLayoutPreference'
 import { useAccountActionMenuRuntime } from './accounts/accountActionMenuRuntime'
-import { useGrokAccountsPage } from './accounts/useGrokAccountsPage'
-import { useConfirmDialog } from '@/composables/useConfirmDialog'
-import { useToast } from '@/composables/useToast'
-import { errorMessage } from '@/lib/errorMessage'
 import {
   accountGroupLabel as buildAccountGroupLabel,
   accountGroupNameMap as buildAccountGroupNameMap,
   accountProxyText,
   accountStatusDetailText as buildAccountStatusDetailText,
   buildAccountGroupRows,
-  buildAccountProgressMetricItems,
 } from './accounts/viewUtils'
 
 defineOptions({ name: 'Accounts' })
 
 const RemoteAccountImportPanel = defineAsyncComponent(() => import('@/components/ai/RemoteAccountImportPanel.vue'))
-const confirmDialog = useConfirmDialog()
-const toast = useToast()
-const showLoginPassword = ref(false)
-const showTwoFactorSecret = ref(false)
-
-async function writeClipboardText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return
-    } catch {
-      // Fall through for HTTP origins and browsers that deny Clipboard API access.
-    }
-  }
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  const copied = document.execCommand('copy')
-  textarea.remove()
-  if (!copied) throw new Error('copy failed')
-}
-
-async function copyCredential(value: string, label: string) {
-  const text = String(value || '').trim()
-  if (!text) return
-  try {
-    await writeClipboardText(text)
-    toast.success(`${label}已复制`)
-  } catch {
-    toast.error(`${label}复制失败`)
-  }
-}
 
 const {
   loading,
   saving,
   showModal,
+  showAccountTestModal,
+  accountTestAccount,
+  accountTestMode,
+  accountTestModel,
+  accountTestPrompt,
+  accountTestRunning,
+  accountTestResult,
+  accountTestModelOptions,
+  accountTestModelCatalogLoading,
   keyword,
   statusFilter,
   groupFilter,
@@ -1137,19 +831,22 @@ const {
   accountAllTotal,
   selectedCount,
   allVisibleSelected,
+  someVisibleSelected,
+  allMatchingSelected,
   currentPage,
   pageSize,
   pageSizeOptions,
   batchBusy,
-  batchActionLabel,
   viewMode,
-  refreshingAccountId,
-  resettingAccountId,
+  syncingAccountIds,
+  refreshingAccessTokenAccountIds,
+  accountOperationBusy,
   importBusy,
   exportBusy,
   showImportModal,
   importMode,
   importModeOptions,
+  importTargetGroupValue,
   oauthEmailHint,
   oauthCallbackText,
   oauthSessionId,
@@ -1183,21 +880,21 @@ const {
   refreshProgressTitle,
   refreshProgress,
   refreshProgressPercent,
-  refreshProgressMetricLabel,
-  refreshProgressMetricValue,
   refreshProgressStatusText,
   canStopRefreshProgress,
+  canCloseRefreshProgress,
   bulkStopRequested,
-  accountStatusOptions,
+  accountOperationEvents,
   form,
-  filteredAccounts,
-  pagedAccounts,
+  visibleAccounts,
   loadData,
   loadAccountGroups,
   setViewMode,
   isSelected,
   toggleSelect,
   clearSelection,
+  selectAllMatching,
+  selectAllAccounts,
   toggleSelectAllVisible,
   setImportMode,
   openImportModal,
@@ -1222,392 +919,58 @@ const {
   openOAuthAuthorizeUrl,
   copyOAuthAuthorizeUrl,
   finishOAuthLogin,
-  importLocalCPAFiles,
-  refreshAllAccounts,
+  importLocalAccountFiles,
+  updateRemoteImportProgress,
+  startRemoteImportTracking,
   requestStopRefreshProgress,
   closeRefreshProgress,
-  copyAccountToken,
-  extractSelectedCheckout,
-  copyFinalCheckoutLink,
-  openFinalCheckoutLink,
+  copyAccountCredential,
   openCreateModal,
   openEditModal,
+  openAccountTest,
+  closeAccountTest,
+  setAccountTestMode,
+  runAccountTest,
   closeModal,
   saveAccount,
   toggleEnabled,
-  refreshToken,
-  resetAccountState,
+  syncAccount,
+  refreshAccessToken,
   removeAccount,
   runBulkAction,
   bindSelectedAccountsToGroup,
   exportAccounts,
 } = useAccountsPage()
 
-watch(showModal, (visible) => {
-  if (visible) return
-  showLoginPassword.value = false
-  showTwoFactorSecret.value = false
-})
-
-const {
-  loading: grokLoading,
-  keyword: grokKeyword,
-  statusFilter: grokStatusFilter,
-  statusFilterOptions: grokStatusFilterOptions,
-  accounts: grokAccounts,
-  summary: grokSummary,
-  runtimeAvailable: grokRuntimeAvailable,
-  runtimeError: grokRuntimeError,
-  probePollingEnabled: grokProbePollingEnabled,
-  probePollingBusy: grokProbePollingBusy,
-  toggleProbePolling: toggleGrokProbePolling,
-  accountListTotal: grokAccountListTotal,
-  accountAllTotal: grokAccountAllTotal,
-  currentPage: grokCurrentPage,
-  pageSize: grokPageSize,
-  pageSizeOptions: grokPageSizeOptions,
-  viewMode: grokViewMode,
-  selectedCount: grokSelectedCount,
-  allVisibleSelected: grokAllVisibleSelected,
-  isSelected: isGrokAccountSelected,
-  toggleSelect: toggleGrokAccountSelection,
-  toggleSelectAllVisible: toggleSelectAllVisibleGrokAccounts,
-  clearSelection: clearGrokSelection,
-  batchBusy: grokBatchBusy,
-  batchActionLabel: grokBatchActionLabel,
-  authorizingAccountId: grokAuthorizingAccountId,
-  authorizeOAuth: authorizeGrokOAuth,
-  syncingAccountId: grokSyncingAccountId,
-  syncAccounts: syncGrokAccounts,
-  refreshingAccountId: grokRefreshingAccountId,
-  refreshRuntime: refreshGrokRuntime,
-  testingAccountId: grokTestingAccountId,
-  testAccountValidity: testGrokAccountValidity,
-  togglingAccountId: grokTogglingAccountId,
-  setRuntimeDisabled: setGrokRuntimeDisabled,
-  removingAccountId: grokRemovingAccountId,
-  exportBusy: grokExportBusy,
-  setViewMode: setGrokViewMode,
-  loadData: loadGrokAccounts,
-  removeAccount: removeGrokAccount,
-  runBulkAction: runGrokBulkAction,
-  exportAccounts: exportGrokAccounts,
-  exportSsoAccounts: grokExportSsoAccounts,
-} = useGrokAccountsPage()
-
-type AccountPlatformView = 'gpt' | 'grok'
-
-const route = useRoute()
-const router = useRouter()
-
-function accountPlatformFromQuery(value: unknown): AccountPlatformView {
-  return String(value || '').trim().toLowerCase() === 'grok' ? 'grok' : 'gpt'
-}
-
-const activeAccountPlatform = ref<AccountPlatformView>(accountPlatformFromQuery(route.query.platform))
-const grokCredentialsAccount = ref<GrokAccount | null>(null)
-const grokConversationAccount = ref<GrokAccount | null>(null)
-const grokChattingAccountId = ref('')
-type GrokOAuthPanelRef = {
-  refreshAccount: (id: string) => Promise<void>
-  syncModels: (id: string) => Promise<void>
-  setDisabled: (account: GrokOAuthAccount) => Promise<void>
-  removeAccount: (id: string) => Promise<void>
-}
-type GrokOAuthRowAction = 'sync' | 'refresh' | 'toggle' | 'remove'
-const grokOAuthPanelRef = ref<GrokOAuthPanelRef | null>(null)
-const showGrokOAuthAccess = ref(false)
-const grokOAuthRowAction = reactive<{ accountId: string; action: GrokOAuthRowAction | '' }>({
-  accountId: '',
-  action: '',
-})
-const accountPlatformOptions = computed(() => [
-  { value: 'gpt', label: `GPT (${accountAllTotal.value})` },
-  { value: 'grok', label: `Grok (${grokAccountAllTotal.value})` },
-])
-
-const grokExportMenuItems = computed(() => [
-  {
-    key: 'selected',
-    label: `导出选中${grokSelectedCount.value ? ` (${grokSelectedCount.value})` : ''}`,
-    disabled: grokSelectedCount.value === 0,
-    children: [
-      { key: 'selected_sub2api', label: 'Sub2API 格式 (.json)' },
-      { key: 'selected_cpa', label: 'CPA 格式 (.zip)' },
-      { key: 'selected_sso', label: 'SSO 格式 (.txt)' },
-    ],
-  },
-  {
-    key: 'all',
-    label: '导出全部',
-    disabled: grokAccountAllTotal.value === 0,
-    dividerBefore: true,
-    children: [
-      { key: 'all_sub2api', label: 'Sub2API 格式 (.json)' },
-      { key: 'all_cpa', label: 'CPA 格式 (.zip)' },
-      { key: 'all_sso', label: 'SSO 格式 (.txt)' },
-    ],
-  },
-])
-
-const grokBatchMenuItems = computed(() => [
-  { key: 'authorize', label: 'OAuth 授权' },
-  { key: 'sync', label: '加入运行池', disabled: !grokRuntimeAvailable.value },
-  { key: 'refresh', label: '刷新状态和额度', disabled: !grokRuntimeAvailable.value },
-  { key: 'disable', label: '禁用选中', disabled: !grokRuntimeAvailable.value },
-  { key: 'enable', label: '恢复选中', disabled: !grokRuntimeAvailable.value },
-  { key: 'delete', label: '删除选中', danger: true },
-])
-
-const grokQuotaMetricLabels: Record<GrokQuotaMode, string> = {
-  auto: 'Auto 余额',
-  fast: 'Fast 余额',
-  expert: 'Expert 余额',
-  heavy: 'Heavy 余额',
-  console: 'Console 余额',
-}
-
-function safeMetricNumber(value: unknown): number {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
-}
-
-function optionalMetricNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') return null
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : null
-}
-
-const grokMetricItems = computed(() => {
-  const summary = grokSummary.value || {}
-  const syncedCount = optionalMetricNumber(summary.synced)
-  const items: Array<{
-    key: string
-    label: string
-    value: string | number
-    meta?: string
-    valueClass?: string
-  }> = [{
-    key: 'registration-total',
-    label: '注册总数',
-    value: safeMetricNumber(summary.total ?? grokAccountAllTotal.value),
-    meta: grokRuntimeAvailable.value
-      ? (syncedCount === null ? '运行时已就绪' : `已加入 ${syncedCount}`)
-      : '运行状态未连接',
-  }]
-
-  const runtimeTotal = safeMetricNumber(summary.runtime_total)
-  const oauthTotal = safeMetricNumber(summary.oauth_total)
-  const oauthLinked = safeMetricNumber(summary.oauth_linked)
-  items.push({
-    key: 'oauth-total',
-    label: 'OAuth 已授权',
-    value: oauthLinked,
-    meta: `OAuth 凭据 ${oauthTotal}`,
-    valueClass: 'text-emerald-600',
-  })
-
-  const oauthStatus = summary.oauth_status || {}
-  const oauthMetrics = [
-    { key: 'oauth-normal', label: 'OAuth 正常', value: optionalMetricNumber(oauthStatus.normal), valueClass: 'text-emerald-600' },
-    { key: 'oauth-limited', label: 'OAuth 限流', value: optionalMetricNumber(oauthStatus.limited), valueClass: 'text-amber-600' },
-    { key: 'oauth-no-quota', label: '无额度/无订阅', value: optionalMetricNumber(oauthStatus.no_quota), valueClass: 'text-amber-600' },
-    { key: 'oauth-expired', label: 'OAuth 过期', value: optionalMetricNumber(oauthStatus.expired), valueClass: 'text-rose-600' },
-    { key: 'oauth-invalid', label: 'OAuth 失效', value: optionalMetricNumber(oauthStatus.invalid), valueClass: 'text-rose-600' },
-    { key: 'oauth-unknown', label: 'OAuth 未确认', value: optionalMetricNumber(oauthStatus.unknown), valueClass: 'text-amber-600' },
-    { key: 'oauth-unauthorized', label: 'OAuth 未授权', value: optionalMetricNumber(oauthStatus.unauthorized), valueClass: 'text-muted-foreground' },
-    { key: 'oauth-denied', label: 'OAuth 拒绝', value: optionalMetricNumber(oauthStatus.denied), valueClass: 'text-rose-600' },
-  ]
-  for (const metric of oauthMetrics) {
-    if (metric.value === null) continue
-    items.push({ ...metric, value: metric.value })
-  }
-
-  if (!grokRuntimeAvailable.value || runtimeTotal <= 0) {
-    items.push({
-      key: 'runtime-connection',
-      label: 'Grok 运行时',
-      value: grokRuntimeAvailable.value ? '已连接' : '不可用',
-      meta: grokRuntimeAvailable.value ? '尚无已加入运行账号' : (grokRuntimeError.value || '请检查运行时状态'),
-      valueClass: grokRuntimeAvailable.value ? 'text-emerald-600' : 'text-amber-600',
-    })
-    return items
-  }
-
-  const runtimeMetrics = [
-    { key: 'calls-total', label: '调用总数', value: optionalMetricNumber(summary.calls_total), valueClass: '' },
-  ]
-  for (const metric of runtimeMetrics) {
-    if (metric.value === null) continue
-    items.push({ ...metric, value: metric.value })
-  }
-
-  const quota = summary.quota || {}
-  for (const mode of Object.keys(grokQuotaMetricLabels) as GrokQuotaMode[]) {
-    const value = optionalMetricNumber(quota[mode])
-    if (value === null) continue
-    items.push({ key: `quota-${mode}`, label: grokQuotaMetricLabels[mode], value })
-  }
-  return items
-})
-
-const grokOAuthTotal = computed(() => safeMetricNumber(grokSummary.value?.oauth_total))
-
-function applyActiveAccountPlatform(value: AccountPlatformView) {
-  activeAccountPlatform.value = value
-  if (value !== 'grok') grokCredentialsAccount.value = null
-  if (value !== 'grok') showGrokOAuthAccess.value = false
-  if (value !== 'grok' && !grokChattingAccountId.value) grokConversationAccount.value = null
-  if (value === 'grok' && !grokLoading.value && grokAccounts.value.length === 0) {
-    void loadGrokAccounts({ silentErrorToast: true })
-  }
-}
-
-function setActiveAccountPlatform(value: string) {
-  if (value !== 'gpt' && value !== 'grok') return
-  applyActiveAccountPlatform(value)
-
-  const current = accountPlatformFromQuery(route.query.platform)
-  if (current === value) return
-  const query = { ...route.query }
-  if (value === 'grok') query.platform = 'grok'
-  else delete query.platform
-  void router.replace({ name: 'accounts', query })
-}
+const { listLayoutMode, isWorkspaceLayout } = useListLayoutPreference()
 
 watch(
-  () => route.query.platform,
-  (value) => {
-    const platform = accountPlatformFromQuery(value)
-    if (platform !== activeAccountPlatform.value) applyActiveAccountPlatform(platform)
+  [showModal, showImportModal, showAccountGroupsModal, showAccountTestModal],
+  ([accountModalOpen, importModalOpen, groupsModalOpen, testModalOpen]) => {
+    if (!accountModalOpen && !importModalOpen && !groupsModalOpen && !testModalOpen) return
+    if (canCloseRefreshProgress.value) closeRefreshProgress()
   },
 )
 
-async function handleGrokExportAction(action: string) {
-  const match = action.match(/^(selected|all)_(sub2api|cpa|sso)$/)
-  if (!match) return
-  if (match[2] === 'sso') {
-    await grokExportSsoAccounts(match[1] as 'selected' | 'all')
-    return
-  }
-  await exportGrokAccounts(
-    match[1] as 'selected' | 'all',
-    match[2] as 'sub2api' | 'cpa',
-  )
-}
-
-async function syncGrokAccount(item: GrokAccount) {
-  await syncGrokAccounts([item.id])
-}
-
-async function refreshGrokAccount(item: GrokAccount) {
-  await refreshGrokRuntime([item.id])
-}
-
-async function testGrokAccount(item: GrokAccount) {
-  await testGrokAccountValidity(item)
-}
-
-function openGrokConversationTest(item: GrokAccount) {
-  if (!item.has_sso || grokChattingAccountId.value) return
-  grokConversationAccount.value = item
-}
-
-function closeGrokConversationTest() {
-  if (grokChattingAccountId.value) return
-  grokConversationAccount.value = null
-}
-
-function setGrokConversationRunning(accountId: string, running: boolean) {
-  if (running) {
-    grokChattingAccountId.value = accountId
-    return
-  }
-  if (grokChattingAccountId.value !== accountId) return
-  grokChattingAccountId.value = ''
-  void loadGrokAccounts({ silentErrorToast: true }).then(() => {
-    const refreshed = grokAccounts.value.find((item) => item.id === accountId)
-    if (refreshed && grokConversationAccount.value?.id === accountId) {
-      grokConversationAccount.value = refreshed
-    }
-  })
-}
-
-async function toggleGrokAccountDisabled(item: GrokAccount) {
-  const disabled = String(item.runtime_status || '').toLowerCase() !== 'disabled'
-  await setGrokRuntimeDisabled([item.id], disabled)
-}
-
-function authorizeGrokOAuthAccount(item: GrokAccount) {
-  return authorizeGrokOAuth([item.id])
-}
-
-function grokOAuthActionFor(item: GrokAccount) {
-  if (!grokOAuthRowAction.accountId) return ''
-  return grokOAuthRowAction.accountId === item.id ? grokOAuthRowAction.action : 'busy'
-}
-
-async function runGrokOAuthAccountAction(item: GrokAccount, action: GrokOAuthRowAction) {
-  const oauth = item.oauth
-  const panel = grokOAuthPanelRef.value
-  if (!oauth || !panel || grokOAuthRowAction.accountId) return
-  grokOAuthRowAction.accountId = item.id
-  grokOAuthRowAction.action = action
-  try {
-    if (action === 'sync') await panel.syncModels(oauth.id)
-    if (action === 'refresh') await panel.refreshAccount(oauth.id)
-    if (action === 'toggle') await panel.setDisabled(oauth)
-    if (action === 'remove') await panel.removeAccount(oauth.id)
-  } finally {
-    grokOAuthRowAction.accountId = ''
-    grokOAuthRowAction.action = ''
-  }
-}
-
-function syncGrokOAuthAccount(item: GrokAccount) {
-  return runGrokOAuthAccountAction(item, 'sync')
-}
-
-function refreshGrokOAuthAccount(item: GrokAccount) {
-  return runGrokOAuthAccountAction(item, 'refresh')
-}
-
-function toggleGrokOAuthAccount(item: GrokAccount) {
-  return runGrokOAuthAccountAction(item, 'toggle')
-}
-
-async function removeGrokOAuthAccount(item: GrokAccount) {
-  if (!item.oauth) return
-  const confirmed = await confirmDialog.ask({
-    title: '移除 OAuth',
-    message: `将移除 ${item.email || item.id} 的 OAuth 凭据，注册账号和 SSO 登录态会保留。是否继续？`,
-    confirmText: '移除 OAuth',
-    cancelText: '取消',
-  })
-  if (confirmed) await runGrokOAuthAccountAction(item, 'remove')
-}
-
-function handleGrokOAuthChanged() {
-  void loadGrokAccounts({ silentErrorToast: true, silentLoading: true })
-}
-
-function openGrokLoginCredentials(item: GrokAccount) {
-  if (!item.has_password) return
-  grokCredentialsAccount.value = item
-}
-
 const manualTokenFileInputRef = ref<HTMLInputElement | null>(null)
-const cpaFileInputRef = ref<HTMLInputElement | null>(null)
+const accountFileInputRef = ref<HTMLInputElement | null>(null)
 const remoteImportBusy = ref(false)
 const accountToolbarMenuClass = 'shrink-0 whitespace-nowrap'
 const accountToolbarButtonClass = 'shrink-0 whitespace-nowrap justify-between gap-2'
 const accountStatusDetailCardClass = 'w-72 account-status-detail-card'
 const accountToolbarSecondaryClass = `${accountToolbarButtonClass} text-muted-foreground`
+const accountSourceOptions = [
+  { label: 'Web', value: 'web' },
+  { label: 'Codex', value: 'codex' },
+] as const
 const importModalBusy = computed(() => importBusy.value || remoteImportBusy.value)
+const resolvedImportTargetGroupId = computed(() => (
+  importTargetGroupValue.value === '__preserve__' ? null : importTargetGroupValue.value
+))
 
 const accountGroupNameMap = computed(() => buildAccountGroupNameMap(accountGroups.value))
 
-const accountGroupRows = computed(() => buildAccountGroupRows(accountGroups.value, proxyGroups.value))
+const accountGroupRows = computed(() => buildAccountGroupRows(accountGroups.value))
 
 function accountGroupLabel(groupId: string | undefined) {
   return buildAccountGroupLabel(groupId, accountGroupNameMap.value)
@@ -1617,34 +980,30 @@ function accountStatusDetailText(item: Account) {
   return buildAccountStatusDetailText(item, accountGroupLabel, accountProxyText)
 }
 
-const refreshProgressItems = computed(() => buildAccountProgressMetricItems(
-  refreshProgressMetricLabel.value,
-  refreshProgressMetricValue.value,
-  refreshProgressStatusText.value,
-))
-
 const {
   accountEntryItems,
   exportMenuItems,
   batchMenuItems,
-  toolbarBatchMenuItems,
+  batchMenuLabel,
   handleBatchAction,
-  handleToolbarBatchAction,
   handleAccountEntryAction,
   handleExportAction,
 } = useAccountActionMenuRuntime({
   selectedCount,
   accountAllTotal,
+  accountMatchingTotal: accountListTotal,
+  allMatchingSelected,
   accountGroupsLoading,
   bindAccountGroupOptions,
   selectedBindGroupId,
   openCreateModal,
   openImportModal,
   exportAccounts,
-  refreshAllAccounts,
-  extractSelectedCheckout,
   runBulkAction,
   bindSelectedAccountsToGroup,
+  selectAllAccounts,
+  selectAllMatching,
+  clearSelection,
 })
 
 function openManualTokenFile() {
@@ -1660,21 +1019,18 @@ async function handleManualTokenFileChange(event: Event) {
   if (target) target.value = ''
 }
 
-function openCPAFileDialog() {
-  if (!cpaFileInputRef.value || importBusy.value) return
-  cpaFileInputRef.value.value = ''
-  cpaFileInputRef.value.click()
+function openAccountFileDialog() {
+  if (!accountFileInputRef.value || importBusy.value) return
+  accountFileInputRef.value.value = ''
+  accountFileInputRef.value.click()
 }
 
-async function handleCPAFileChange(event: Event) {
+async function handleAccountFileChange(event: Event) {
   const target = event.target as HTMLInputElement | null
-  await importLocalCPAFiles(target?.files)
+  await importLocalAccountFiles(target?.files)
   if (target) target.value = ''
 }
 
-function handleRemoteImportDone() {
-  void loadData({ silentErrorToast: true })
-}
 </script>
 
 <style scoped>
@@ -1682,6 +1038,18 @@ function handleRemoteImportDone() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.accounts-card-results--contained {
+  max-height: min(36rem, 60dvh);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+@media (min-width: 1024px) {
+  .accounts-card-results--contained {
+    max-height: none;
+  }
 }
 
 .accounts-toolbar-row {
@@ -1707,10 +1075,13 @@ function handleRemoteImportDone() {
   flex: 1 1 34rem;
 }
 
-.accounts-toolbar-summary {
+.accounts-toolbar-view {
   display: flex;
+  min-height: 2rem;
   flex: 0 0 auto;
+  align-items: center;
   justify-content: flex-end;
+  gap: 12px;
 }
 
 .accounts-toolbar-group {
@@ -1736,7 +1107,7 @@ function handleRemoteImportDone() {
 }
 
 @media (max-width: 900px) {
-  .accounts-toolbar-summary {
+  .accounts-toolbar-view {
     width: 100%;
     justify-content: flex-start;
   }

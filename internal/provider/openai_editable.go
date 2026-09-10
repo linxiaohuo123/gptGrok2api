@@ -1,3 +1,8 @@
+// [INPUT]: accounts/protocol
+// [OUTPUT]: 可编辑文件任务：prepareEditable、startEditable、pollEditableArtifacts、ExportEditable
+// [POS]: PPT/PSD 等可编辑产物的上传、轮询与导出。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package provider
 
 import (

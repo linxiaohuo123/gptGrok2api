@@ -12,14 +12,9 @@ import {
   setStringPreference,
 } from '@/lib/preferences'
 import type { StudioImageForm } from '@/components/studio/types'
-import type { useSettingsStore } from '@/stores/settings'
 
-export type StudioModelFormRuntimeInput = {
-  settingsStore: ReturnType<typeof useSettingsStore>
-}
-
-export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
-  const { chatModels, imageModels, loadModelCatalog } = useModelCatalog(() => input.settingsStore.settings)
+export function useStudioModelFormRuntime() {
+  const { catalog, chatModels, imageModels, loadModelCatalog } = useModelCatalog()
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
   const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
   const imageForm = reactive<StudioImageForm>({
@@ -29,14 +24,36 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     n: 1,
   })
 
-  const chatModelOptions = computed(() => uniqueStrings(['auto', ...chatModels.value]))
-  const imageModelOptions = computed(() => uniqueStrings([imageForm.model, DEFAULT_IMAGE_MODEL, ...imageModels.value]))
+  const chatModelOptions = computed(() => (
+    catalog.value ? [...chatModels.value] : uniqueStrings([chatModel.value])
+  ))
+  const imageModelOptions = computed(() => (
+    catalog.value ? [...imageModels.value] : uniqueStrings([imageForm.model])
+  ))
+  const imageHighResolutionEnabled = computed(() => {
+    const capabilities = catalog.value?.capabilities
+    return Boolean(
+      capabilities?.image_upscale
+      || capabilities?.high_resolution_image_models.includes(imageForm.model),
+    )
+  })
 
   watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
   watch(chatReasoningEffort, (effort) => setStringPreference(preferenceKeys.studioChatReasoningEffort, effort || ''))
   watch(() => imageForm.model, (model) => {
     setStringPreference(preferenceKeys.studioImageModel, model || DEFAULT_IMAGE_MODEL)
-    if (!isImageSizeSupportedByModel(imageForm.size, model)) imageForm.size = DEFAULT_IMAGE_SIZE
+  })
+  watch(catalog, (value) => {
+    if (!value) return
+    if (!value.chat_models.includes(chatModel.value)) {
+      chatModel.value = value.defaults.chat_model
+    }
+    if (!value.image_models.includes(imageForm.model)) {
+      imageForm.model = value.defaults.image_model
+    }
+  }, { immediate: true })
+  watch([() => imageForm.model, imageHighResolutionEnabled], ([, highResolutionEnabled]) => {
+    if (!isImageSizeSupportedByModel(imageForm.size, highResolutionEnabled)) imageForm.size = DEFAULT_IMAGE_SIZE
   })
 
   return {
@@ -45,6 +62,7 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     chatReasoningEffort,
     imageForm,
     imageModelOptions,
+    imageHighResolutionEnabled,
     loadModelCatalog,
   }
 }

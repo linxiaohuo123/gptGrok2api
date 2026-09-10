@@ -1,6 +1,6 @@
 <template>
   <div class="space-y-6">
-    <PagePanel v-if="localSettings" class="space-y-5">
+    <PagePanel v-if="localSettings" class="settings-page-panel space-y-5">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p class="ui-section-title">设置</p>
@@ -10,7 +10,7 @@
           <Button size="sm" variant="outline" :disabled="settingsStore.isLoading || isSaving" @click="reloadSettings">
             {{ settingsStore.isLoading ? '刷新中...' : '刷新' }}
           </Button>
-          <Button size="sm" variant="primary" :disabled="isSaving || !localSettings" @click="handleSave">
+          <Button size="sm" variant="primary" :disabled="settingsStore.isLoading || isSaving || !localSettings || hasInvalidNumberSettings" @click="handleSave">
             {{ isSaving ? '保存中...' : '保存设置' }}
           </Button>
         </div>
@@ -29,32 +29,20 @@
           <div class="space-y-4 xl:col-span-2">
             <SettingsBasicConfigPanel
               :settings="localSettings"
+              :fields="settingsFields"
               :refresh-account-interval-field="refreshAccountIntervalField"
-              :image-retention-days-field="imageRetentionDaysField"
-              :log-retention-days-field="logRetentionDaysField"
+              :image-retention-hours-field="imageRetentionHoursField"
+              :log-retention-hours-field="logRetentionHoursField"
+              :console-request-timeout-field="consoleRequestTimeoutField"
               :image-poll-timeout-field="imagePollTimeoutField"
               :image-stream-timeout-field="imageStreamTimeoutField"
+              :image-poll-initial-wait-field="imagePollInitialWaitField"
+              :image-poll-interval-field="imagePollIntervalField"
               :image-account-concurrency-field="imageAccountConcurrencyField"
-              :image-timeout-retry-field="imageTimeoutRetryField"
-              :proxy-busy="proxyBusy"
-              :proxy-test-result="proxyTestResult"
-              @clear-proxy-test-result="proxyTestResult = null"
-              @test-default-proxy="testDefaultProxy"
+              :account-processing-concurrency-field="accountProcessingConcurrencyField"
             />
 
-            <SettingsProxyRuntimePanel
-              v-model:clearance-test-target="clearanceTestTarget"
-              :settings="localSettings"
-              :runtime-status="proxyRuntimeStatus"
-              :runtime-loading="proxyRuntimeLoading"
-              :runtime-testing="proxyRuntimeTesting"
-              :clearance-test-result="clearanceTestResult"
-              :clearance-timeout-field="clearanceTimeoutField"
-              :clearance-refresh-interval-field="clearanceRefreshIntervalField"
-              @clear-clearance-test-result="clearanceTestResult = null"
-              @refresh-runtime-status="loadProxyRuntimeStatus(false)"
-              @test-clearance="testProxyClearance"
-            />
+            <SettingsDashboardPreferencesPanel />
 
             <FormSection title="全局附加指令">
               <FormField label="全局系统提示词">
@@ -65,6 +53,7 @@
                   v-model="localSettings.global_system_prompt"
                   rows="5"
                   class="ui-textarea-sm"
+                  :disabled="fieldReadOnly('global_system_prompt')"
                   placeholder="例如：先判断用户提示词是否合规；遇到违法、色情、暴力、仇恨等请求时拒绝回答。"
                 ></textarea>
               </FormField>
@@ -74,6 +63,7 @@
                   v-model="sensitiveWordsText"
                   rows="5"
                   class="ui-textarea-sm"
+                  :disabled="fieldReadOnly('sensitive_words')"
                   placeholder="一行一个，命中即拒绝"
                 ></textarea>
               </FormField>
@@ -82,20 +72,18 @@
 
           <SettingsBasicPolicyPanel
             :settings="localSettings"
+            :fields="settingsFields"
+            :image-max-account-attempts-field="imageMaxAccountAttemptsField"
             :image-settle-seconds-field="imageSettleSecondsField"
             @set-log-level="setLogLevel"
           />
         </div>
       </div>
 
-      <SettingsImageErrorsPanel
-        v-else-if="activeSettingsTab === 'image-errors'"
-        :settings="localSettings"
-      />
-
       <SettingsStorageReviewPanel
         v-else-if="activeSettingsTab === 'storage'"
         :settings="localSettings"
+        :fields="settingsFields"
         :image-storage-busy="imageStorageBusy"
         :image-storage-test-result="imageStorageTestResult"
         @test-storage="testImageStorageConnection"
@@ -109,6 +97,7 @@
       <SettingsBackupPanel
         v-else-if="activeSettingsTab === 'backup'"
         :settings="localSettings"
+        :fields="settingsFields"
         :backup-interval-minutes-field="backupIntervalMinutesField"
         :backup-rotation-keep-field="backupRotationKeepField"
         :backup-busy="backupBusy"
@@ -127,49 +116,49 @@
         v-else-if="activeSettingsTab === 'canvas' || activeSettingsTab === 'api-docs'"
         :mode="activeSettingsTab"
         :settings="localSettings"
-        :class="activeSettingsTab === 'canvas' ? 'max-w-3xl' : ''"
+        :fields="settingsFields"
+        :genbox-timeout-seconds-field="genboxTimeoutSecondsField"
+      />
+
+      <SettingsUserKeysPanel
+        v-else-if="activeSettingsTab === 'keys'"
+        :user-keys="userKeys"
+        :user-keys-loading="userKeysLoading"
+        :user-key-busy="userKeyBusy"
+        :new-user-key="newUserKey"
+        @load="loadUserKeys"
+        @create="openUserKeyCreateModal"
+        @copy="copyUserKey"
+        @edit="openUserKeyEditModal"
+        @toggle="toggleUserKey"
+        @delete="deleteUserKey"
+      />
+
+      <SettingsExternalSourcesPanel
+        v-else-if="activeSettingsTab === 'cpa' || activeSettingsTab === 'sub2api'"
+        :active-tab="activeSettingsTab"
+        :cpa-pools="cpaPools"
+        :cpa-loading="cpaLoading"
+        :sub2api-servers="sub2apiServers"
+        :sub2api-loading="sub2apiLoading"
+        :sub2api-groups="sub2apiGroups"
+        :remote-import-active="remoteImportActive"
+        :saving-external-source="savingExternalSource"
+        :testing-external-source="testingExternalSource"
+        :external-sources-loading="externalSourcesLoading"
+        @load="loadExternalSources"
+        @create-cpa="openCPAModal"
+        @import-cpa="openCPAImport"
+        @test-cpa="testCPAPool"
+        @edit-cpa="editCPAPool"
+        @delete-cpa="deleteCPAPool"
+        @create-sub2api="openSub2APIModal"
+        @import-sub2api="openSub2APIImport"
+        @test-sub2api="testSub2APIServer"
+        @edit-sub2api="editSub2APIServer"
+        @delete-sub2api="deleteSub2APIServer"
       />
     </PagePanel>
-
-    <SettingsUserKeysPanel
-      v-if="localSettings && activeSettingsTab === 'keys'"
-      :user-keys="userKeys"
-      :user-keys-loading="userKeysLoading"
-      :user-key-busy="userKeyBusy"
-      :new-user-key="newUserKey"
-      @load="loadUserKeys"
-      @create="openUserKeyCreateModal"
-      @copy="copyUserKey"
-      @edit="openUserKeyEditModal"
-      @toggle="toggleUserKey"
-      @delete="deleteUserKey"
-    />
-
-    <SettingsExternalSourcesPanel
-      v-if="localSettings && (activeSettingsTab === 'cpa' || activeSettingsTab === 'sub2api')"
-      :active-tab="activeSettingsTab"
-      :cpa-pools="cpaPools"
-      :cpa-loading="cpaLoading"
-      :sub2api-servers="sub2apiServers"
-      :sub2api-loading="sub2apiLoading"
-      :sub2api-groups="sub2apiGroups"
-      :sub2api-groups-loading-id="sub2apiGroupsLoadingId"
-      :saving-external-source="savingExternalSource"
-      :testing-external-source="testingExternalSource"
-      :external-sources-loading="externalSourcesLoading"
-      @load="loadExternalSources"
-      @create-cpa="openCPAModal"
-      @import-cpa="openCPAImport"
-      @test-cpa="testCPAPool"
-      @edit-cpa="editCPAPool"
-      @delete-cpa="deleteCPAPool"
-      @create-sub2api="openSub2APIModal"
-      @import-sub2api="openSub2APIImport"
-      @test-sub2api="testSub2APIServer"
-      @load-sub2api-groups="loadSub2APIGroups"
-      @edit-sub2api="editSub2APIServer"
-      @delete-sub2api="deleteSub2APIServer"
-    />
 
     <PagePanel v-if="!localSettings" class="py-10 text-center text-sm text-muted-foreground">
       <PageLoadingState
@@ -212,7 +201,7 @@
 
     <ModalShell
       :open="Boolean(remoteImportModal)"
-      max-width="58rem"
+      :aria-label="remoteImportModal === 'cpa' ? '从 CPA 导入账号' : '从 Sub2API 导入账号'"
       :z-index="135"
       close-on-backdrop
       @close="closeRemoteImportModal"
@@ -225,50 +214,109 @@
         @close="closeRemoteImportModal"
       />
       <ModalBody>
+        <AccountImportTargetGroupField
+          v-model="remoteImportTargetGroupValue"
+          class="mb-4"
+          :groups="remoteImportAccountGroups"
+          :loading="remoteImportAccountGroupsLoading"
+          :disabled="remoteImportBusy"
+        />
         <RemoteAccountImportPanel
           v-if="remoteImportModal === 'cpa'"
           mode="cpa"
+          external-tracking
           :cpa-pool-id="remoteImportCPAPoolId"
+          :target-group-id="resolvedRemoteImportTargetGroupId"
           @busy-change="remoteImportBusy = $event"
-          @imported="handleRemoteImportDone"
+          @progress="handleRemoteImportProgress"
+          @started="handleRemoteImportStarted"
         />
         <RemoteAccountImportPanel
           v-else-if="remoteImportModal === 'sub2api'"
           mode="sub2api"
+          external-tracking
           :sub2api-server-id="remoteImportSub2APIServerId"
           :sub2api-group-id="remoteImportSub2APIGroupId"
+          :target-group-id="resolvedRemoteImportTargetGroupId"
           @busy-change="remoteImportBusy = $event"
-          @imported="handleRemoteImportDone"
+          @progress="handleRemoteImportProgress"
+          @started="handleRemoteImportStarted"
         />
       </ModalBody>
     </ModalShell>
+
+    <AccountOperationDrawer
+      :open="remoteImportShowProgress"
+      :title="remoteImportProgressTitle"
+      :status-text="remoteImportProgressStatusText"
+      :progress="remoteImportProgressState"
+      :percent="remoteImportProgressPercent"
+      :events="remoteImportProgressEvents"
+      :can-stop="remoteImportCanStop"
+      :stop-requested="remoteImportStopRequested"
+      :can-close="remoteImportCanClose"
+      @close="closeRemoteImportProgress"
+      @stop="requestRemoteImportStop"
+    />
+
+    <OperationProgressDrawer
+      :open="imageStorageOperationProgress.open"
+      :title="imageStorageOperationProgress.title"
+      :subtitle="imageStorageOperationProgress.subtitle"
+      :total="imageStorageOperationProgress.total"
+      :current="imageStorageOperationProgress.current"
+      :status-label="imageStorageOperationProgress.statusLabel"
+      :error="imageStorageOperationProgress.error"
+      :busy="imageStorageOperationProgress.busy"
+      :tone="imageStorageOperationProgress.tone"
+      :events="imageStorageOperationProgress.events"
+      @close="closeImageStorageOperationProgress"
+    />
+
+    <OperationProgressDrawer
+      :open="backupOperationProgress.open"
+      :title="backupOperationProgress.title"
+      :subtitle="backupOperationProgress.subtitle"
+      :total="backupOperationProgress.total"
+      :current="backupOperationProgress.current"
+      :status-label="backupOperationProgress.statusLabel"
+      :error="backupOperationProgress.error"
+      :busy="backupOperationProgress.busy"
+      :tone="backupOperationProgress.tone"
+      :events="backupOperationProgress.events"
+      @close="closeBackupOperationProgress"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from 'vue'
 import { Button, FormField, FormSection, HelpTip } from 'nanocat-ui'
-import { normalizeProxyRuntime } from '@/api/settings'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
+import OperationProgressDrawer from '@/components/ai/OperationProgressDrawer.vue'
+import AccountImportTargetGroupField from '@/views/accounts/AccountImportTargetGroupField.vue'
+import AccountOperationDrawer from '@/views/accounts/AccountOperationDrawer.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
+import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import {
   backupStatusText as buildBackupStatusText,
+  settingsFieldReadOnly,
   settingsTabs,
+  type SettingsFields,
 } from '@/views/settings/settingsView'
 import SettingsBasicConfigPanel from '@/views/settings/SettingsBasicConfigPanel.vue'
+import SettingsDashboardPreferencesPanel from '@/views/settings/SettingsDashboardPreferencesPanel.vue'
 import SettingsBasicPolicyPanel from '@/views/settings/SettingsBasicPolicyPanel.vue'
 import SettingsBackupPanel from '@/views/settings/SettingsBackupPanel.vue'
 import SettingsExternalSourceModals from '@/views/settings/SettingsExternalSourceModals.vue'
 import SettingsExternalSourcesPanel from '@/views/settings/SettingsExternalSourcesPanel.vue'
-import SettingsImageErrorsPanel from '@/views/settings/SettingsImageErrorsPanel.vue'
 import SettingsIntegrationsPanel from '@/views/settings/SettingsIntegrationsPanel.vue'
-import SettingsProxyRuntimePanel from '@/views/settings/SettingsProxyRuntimePanel.vue'
 import SettingsPromptSourcesPanel from '@/views/settings/SettingsPromptSourcesPanel.vue'
 import SettingsUserKeyModals from '@/views/settings/SettingsUserKeyModals.vue'
 import SettingsStorageReviewPanel from '@/views/settings/SettingsStorageReviewPanel.vue'
@@ -277,9 +325,10 @@ import { useSettingsBackupRuntime } from '@/views/settings/settingsBackupRuntime
 import { useSettingsConfigRuntime } from '@/views/settings/settingsConfigRuntime'
 import { useSettingsExternalSourcesRuntime } from '@/views/settings/settingsExternalSourcesRuntime'
 import { useSettingsImageStorageRuntime } from '@/views/settings/settingsImageStorageRuntime'
-import { useSettingsProxyRuntime } from '@/views/settings/settingsProxyRuntime'
 import { useSettingsTabRuntime } from '@/views/settings/settingsTabRuntime'
 import { useSettingsUserKeysRuntime } from '@/views/settings/settingsUserKeysRuntime'
+import { useAccountBulkProgressRuntime } from '@/views/accounts/accountBulkProgressRuntime'
+import { useRemoteAccountImportTrackingRuntime } from '@/views/accounts/remoteAccountImportTrackingRuntime'
 import { useNumberSettingField } from '@/views/settings/useNumberSettingField'
 
 defineOptions({ name: 'Settings' })
@@ -289,7 +338,6 @@ const RemoteAccountImportPanel = defineAsyncComponent(() => import('@/components
 const pageRuntime = usePageRuntime('settings')
 
 const SETTINGS_RELOAD_REQUEST_KEY = 'settings:reload'
-const PROXY_RUNTIME_REQUEST_KEY = 'settings:proxy-runtime'
 const USER_KEYS_REQUEST_KEY = 'settings:user-keys'
 const BACKUPS_REQUEST_KEY = 'settings:backups'
 const CPA_POOLS_REQUEST_KEY = 'settings:cpa-pools'
@@ -298,8 +346,6 @@ const SUB2API_SERVERS_REQUEST_KEY = 'settings:sub2api-servers'
 const settingsConfigRuntime = useSettingsConfigRuntime({
   runtime: pageRuntime,
   requestKey: SETTINGS_RELOAD_REQUEST_KEY,
-  afterReload: () => loadProxyRuntimeStatus(true),
-  afterSave: () => loadProxyRuntimeStatus(true),
 })
 const settingsStore = settingsConfigRuntime.settingsStore
 const localSettings = settingsConfigRuntime.localSettings
@@ -309,7 +355,7 @@ const settingsLoadError = settingsConfigRuntime.settingsLoadError
 const hasUnsavedSettings = settingsConfigRuntime.hasUnsavedSettings
 const requireSavedSettings = settingsConfigRuntime.requireSavedSettings
 const reloadSettings = settingsConfigRuntime.reloadSettings
-const handleSave = settingsConfigRuntime.handleSave
+const saveSettings = settingsConfigRuntime.handleSave
 const backupRuntime = useSettingsBackupRuntime({
   runtime: pageRuntime,
   requestKey: BACKUPS_REQUEST_KEY,
@@ -321,6 +367,8 @@ const backupLoading = backupRuntime.backupLoading
 const backupState = backupRuntime.backupState
 const backupItems = backupRuntime.backupItems
 const backupTestResult = backupRuntime.backupTestResult
+const backupOperationProgress = backupRuntime.operationProgress
+const closeBackupOperationProgress = backupRuntime.closeOperationProgress
 const loadBackups = backupRuntime.loadBackups
 const testBackupConnection = backupRuntime.testBackupConnection
 const runBackupNow = backupRuntime.runBackupNow
@@ -341,11 +389,17 @@ const remoteImportModal = externalSourcesRuntime.remoteImportModal
 const remoteImportCPAPoolId = externalSourcesRuntime.remoteImportCPAPoolId
 const remoteImportSub2APIServerId = externalSourcesRuntime.remoteImportSub2APIServerId
 const remoteImportSub2APIGroupId = externalSourcesRuntime.remoteImportSub2APIGroupId
+const remoteImportTargetGroupValue = externalSourcesRuntime.remoteImportTargetGroupValue
 const remoteImportBusy = externalSourcesRuntime.remoteImportBusy
+const remoteImportActive = externalSourcesRuntime.remoteImportActive
+const remoteImportAccountGroups = externalSourcesRuntime.accountGroups
+const remoteImportAccountGroupsLoading = externalSourcesRuntime.accountGroupsLoading
+const resolvedRemoteImportTargetGroupId = computed(() => (
+  remoteImportTargetGroupValue.value === '__preserve__' ? null : remoteImportTargetGroupValue.value
+))
 const cpaPools = externalSourcesRuntime.cpaPools
 const sub2apiServers = externalSourcesRuntime.sub2apiServers
 const sub2apiGroups = externalSourcesRuntime.sub2apiGroups
-const sub2apiGroupsLoadingId = externalSourcesRuntime.sub2apiGroupsLoadingId
 const editingCPAPoolId = externalSourcesRuntime.editingCPAPoolId
 const editingSub2APIId = externalSourcesRuntime.editingSub2APIId
 const cpaForm = externalSourcesRuntime.cpaForm
@@ -360,14 +414,47 @@ const openSub2APIModal = externalSourcesRuntime.openSub2APIModal
 const editSub2APIServer = externalSourcesRuntime.editSub2APIServer
 const saveSub2APIServer = externalSourcesRuntime.saveSub2APIServer
 const deleteSub2APIServer = externalSourcesRuntime.deleteSub2APIServer
-const loadSub2APIGroups = externalSourcesRuntime.loadSub2APIGroups
 const testSub2APIServer = externalSourcesRuntime.testSub2APIServer
 const openCPAImport = externalSourcesRuntime.openCPAImport
 const openSub2APIImport = externalSourcesRuntime.openSub2APIImport
 const closeRemoteImportModal = externalSourcesRuntime.closeRemoteImportModal
 const closeExternalSourceModal = externalSourcesRuntime.closeExternalSourceModal
 const loadExternalSources = externalSourcesRuntime.loadExternalSources
-const handleRemoteImportDone = externalSourcesRuntime.handleRemoteImportDone
+const remoteImportProgress = useAccountBulkProgressRuntime()
+const remoteImportShowProgress = remoteImportProgress.showRefreshProgress
+const remoteImportProgressTitle = remoteImportProgress.refreshProgressTitle
+const remoteImportProgressStatusText = remoteImportProgress.refreshProgressStatusText
+const remoteImportProgressState = remoteImportProgress.refreshProgress
+const remoteImportProgressPercent = remoteImportProgress.refreshProgressPercent
+const remoteImportProgressEvents = remoteImportProgress.operationEvents
+const remoteImportCanStop = remoteImportProgress.canStopRefreshProgress
+const remoteImportStopRequested = remoteImportProgress.bulkStopRequested
+const remoteImportCanClose = remoteImportProgress.canCloseRefreshProgress
+const closeRemoteImportProgress = remoteImportProgress.close
+const requestRemoteImportStop = remoteImportProgress.requestStop
+const remoteImportTracking = useRemoteAccountImportTrackingRuntime({
+  bulkProgress: remoteImportProgress,
+  onFinished: externalSourcesRuntime.handleRemoteImportDone,
+})
+
+async function handleRemoteImportProgress(value: Parameters<typeof remoteImportTracking.updateProgress>[0]) {
+  await remoteImportTracking.updateProgress(value)
+}
+
+async function handleRemoteImportStarted(value: Parameters<typeof remoteImportTracking.start>[0]) {
+  externalSourcesRuntime.applyRemoteImportStarted(value.mode, value.source_id, value.job)
+  externalSourcesRuntime.handoffRemoteImport()
+  await remoteImportTracking.start(value)
+}
+pageRuntime.onActivate(() => {
+  void remoteImportTracking.resume()
+})
+pageRuntime.onShow(() => {
+  void remoteImportTracking.resume()
+})
+pageRuntime.onDeactivate(remoteImportTracking.stop)
+pageRuntime.onHide(remoteImportTracking.stop)
+
 const userKeysRuntime = useSettingsUserKeysRuntime({
   runtime: pageRuntime,
   requestKey: USER_KEYS_REQUEST_KEY,
@@ -404,117 +491,162 @@ const sensitiveWordsText = computed({
 const imageStorageRuntime = useSettingsImageStorageRuntime({ requireSavedSettings })
 const imageStorageBusy = imageStorageRuntime.imageStorageBusy
 const imageStorageTestResult = imageStorageRuntime.imageStorageTestResult
+const imageStorageOperationProgress = imageStorageRuntime.operationProgress
+const closeImageStorageOperationProgress = imageStorageRuntime.closeOperationProgress
 const testImageStorageConnection = imageStorageRuntime.testImageStorageConnection
 const syncImageStorageFiles = imageStorageRuntime.syncImageStorageFiles
-const proxyRuntime = useSettingsProxyRuntime({
-  runtime: pageRuntime,
-  requestKey: PROXY_RUNTIME_REQUEST_KEY,
-  localSettings,
-  requireSavedSettings,
-})
-const proxyBusy = proxyRuntime.proxyBusy
-const proxyTestResult = proxyRuntime.proxyTestResult
-const proxyRuntimeLoading = proxyRuntime.proxyRuntimeLoading
-const proxyRuntimeTesting = proxyRuntime.proxyRuntimeTesting
-const proxyRuntimeStatus = proxyRuntime.proxyRuntimeStatus
-const clearanceTestTarget = proxyRuntime.clearanceTestTarget
-const clearanceTestResult = proxyRuntime.clearanceTestResult
-const testDefaultProxy = proxyRuntime.testDefaultProxy
-const loadProxyRuntimeStatus = proxyRuntime.loadProxyRuntimeStatus
-const testProxyClearance = proxyRuntime.testProxyClearance
+const settingsFields = computed<SettingsFields>(() => settingsStore.view?.fields || {})
+const fieldReadOnly = (path: string) => settingsFieldReadOnly(settingsFields.value, path)
+const fieldMetadata = (path: string) => settingsFields.value[path]
 
-const imageRetentionDaysField = useNumberSettingField(
-  () => localSettings.value?.image_retention_days ?? 15,
+const imageRetentionHoursField = useNumberSettingField(
+  () => localSettings.value?.image_retention_hours,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.image_retention_days = value
+    localSettings.value.image_retention_hours = value
   },
-  { integer: true, min: 1, fallback: 15 },
+  { integer: true, metadata: () => fieldMetadata('image_retention_hours') },
 )
-const logRetentionDaysField = useNumberSettingField(
-  () => localSettings.value?.log_retention_days ?? 30,
+const logRetentionHoursField = useNumberSettingField(
+  () => localSettings.value?.log_retention_hours,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.log_retention_days = value
+    localSettings.value.log_retention_hours = value
   },
-  { integer: true, min: 1, fallback: 30 },
+  { integer: true, metadata: () => fieldMetadata('log_retention_hours') },
 )
 const refreshAccountIntervalField = useNumberSettingField(
-  () => localSettings.value?.refresh_account_interval_minute ?? 5,
+  () => localSettings.value?.refresh_account_interval_minute,
   (value) => {
     if (!localSettings.value) return
     localSettings.value.refresh_account_interval_minute = value
   },
-  { integer: true, min: 1, fallback: 5 },
+  { integer: true, metadata: () => fieldMetadata('refresh_account_interval_minute') },
+)
+const consoleRequestTimeoutField = useNumberSettingField(
+  () => localSettings.value?.console_request_timeout_secs,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.console_request_timeout_secs = value
+  },
+  { integer: true, metadata: () => fieldMetadata('console_request_timeout_secs') },
 )
 const imagePollTimeoutField = useNumberSettingField(
-  () => localSettings.value?.image_poll_timeout_secs ?? 120,
+  () => localSettings.value?.image_poll_timeout_secs,
   (value) => {
     if (!localSettings.value) return
     localSettings.value.image_poll_timeout_secs = value
   },
-  { integer: true, min: 1, fallback: 120 },
+  { integer: true, metadata: () => fieldMetadata('image_poll_timeout_secs') },
 )
 const imageStreamTimeoutField = useNumberSettingField(
-  () => localSettings.value?.image_stream_timeout_secs ?? 300,
+  () => localSettings.value?.image_stream_timeout_secs,
   (value) => {
     if (!localSettings.value) return
     localSettings.value.image_stream_timeout_secs = value
   },
-  { integer: true, min: 1, fallback: 300 },
+  { integer: true, metadata: () => fieldMetadata('image_stream_timeout_secs') },
+)
+const imagePollInitialWaitField = useNumberSettingField(
+  () => localSettings.value?.image_poll_initial_wait_secs,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.image_poll_initial_wait_secs = value
+  },
+  { metadata: () => fieldMetadata('image_poll_initial_wait_secs') },
+)
+const imagePollIntervalField = useNumberSettingField(
+  () => localSettings.value?.image_poll_interval_secs,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.image_poll_interval_secs = value
+  },
+  { metadata: () => fieldMetadata('image_poll_interval_secs') },
 )
 const imageAccountConcurrencyField = useNumberSettingField(
-  () => localSettings.value?.image_account_concurrency ?? 3,
+  () => localSettings.value?.image_account_concurrency,
   (value) => {
     if (!localSettings.value) return
     localSettings.value.image_account_concurrency = value
   },
-  { integer: true, min: 1, fallback: 3 },
+  { integer: true, metadata: () => fieldMetadata('image_account_concurrency') },
 )
-const imageTimeoutRetryField = useNumberSettingField(
-  () => localSettings.value?.image_timeout_retry_secs ?? 30,
+const accountProcessingConcurrencyField = useNumberSettingField(
+  () => localSettings.value?.account_processing_concurrency,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.image_timeout_retry_secs = value
+    localSettings.value.account_processing_concurrency = value
   },
-  { integer: true, min: 1, fallback: 30 },
+  { integer: true, metadata: () => fieldMetadata('account_processing_concurrency') },
+)
+const imageMaxAccountAttemptsField = useNumberSettingField(
+  () => localSettings.value?.image_max_account_attempts,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.image_max_account_attempts = value
+  },
+  {
+    integer: true,
+    metadata: () => fieldMetadata('image_max_account_attempts'),
+    enabled: () => Boolean(localSettings.value?.image_account_retry_enabled),
+  },
 )
 const imageSettleSecondsField = useNumberSettingField(
-  () => localSettings.value?.image_settle_secs ?? 5,
+  () => localSettings.value?.image_settle_secs,
   (value) => {
     if (!localSettings.value) return
     localSettings.value.image_settle_secs = value
   },
-  { min: 0.5, fallback: 5 },
-)
-const clearanceTimeoutField = useNumberSettingField(
-  () => localSettings.value?.proxy_runtime?.clearance.timeout_sec ?? 60,
-  (value) => {
-    if (!localSettings.value) return
-    localSettings.value.proxy_runtime = normalizeProxyRuntime(localSettings.value.proxy_runtime)
-    localSettings.value.proxy_runtime.clearance.timeout_sec = value
+  {
+    metadata: () => fieldMetadata('image_settle_secs'),
+    enabled: () => Boolean(localSettings.value?.image_settle_enabled),
   },
-  { integer: true, min: 1, fallback: 60 },
-)
-const clearanceRefreshIntervalField = useNumberSettingField(
-  () => localSettings.value?.proxy_runtime?.clearance.refresh_interval ?? 3600,
-  (value) => {
-    if (!localSettings.value) return
-    localSettings.value.proxy_runtime = normalizeProxyRuntime(localSettings.value.proxy_runtime)
-    localSettings.value.proxy_runtime.clearance.refresh_interval = value
-  },
-  { integer: true, min: 60, fallback: 3600 },
 )
 const backupIntervalMinutesField = useNumberSettingField(
-  () => localSettings.value?.backup?.interval_minutes ?? 1440,
+  () => localSettings.value?.backup.interval_minutes,
   (value) => { if (localSettings.value) localSettings.value.backup.interval_minutes = value },
-  { integer: true, min: 1, fallback: 1440 },
+  { integer: true, metadata: () => fieldMetadata('backup.interval_minutes') },
 )
 const backupRotationKeepField = useNumberSettingField(
-  () => localSettings.value?.backup?.rotation_keep ?? 10,
+  () => localSettings.value?.backup.rotation_keep,
   (value) => { if (localSettings.value) localSettings.value.backup.rotation_keep = value },
-  { integer: true, min: 0, fallback: 10 },
+  { integer: true, metadata: () => fieldMetadata('backup.rotation_keep') },
 )
+const genboxTimeoutSecondsField = useNumberSettingField(
+  () => localSettings.value?.genbox_push.timeout_secs,
+  (value) => { if (localSettings.value) localSettings.value.genbox_push.timeout_secs = value },
+  {
+    integer: true,
+    metadata: () => fieldMetadata('genbox_push.timeout_secs'),
+    enabled: () => Boolean(localSettings.value?.genbox_push.enabled),
+  },
+)
+
+const numberSettingFields = [
+  imageRetentionHoursField,
+  logRetentionHoursField,
+  refreshAccountIntervalField,
+  consoleRequestTimeoutField,
+  imagePollTimeoutField,
+  imageStreamTimeoutField,
+  imagePollInitialWaitField,
+  imagePollIntervalField,
+  imageAccountConcurrencyField,
+  accountProcessingConcurrencyField,
+  imageMaxAccountAttemptsField,
+  imageSettleSecondsField,
+  backupIntervalMinutesField,
+  backupRotationKeepField,
+  genboxTimeoutSecondsField,
+]
+const hasInvalidNumberSettings = computed(() => (
+  numberSettingFields.some((field) => !field.isValid.value)
+))
+
+async function handleSave() {
+  if (settingsStore.isLoading || hasInvalidNumberSettings.value) return
+  await saveSettings()
+}
 
 function setLogLevel(level: string, enabled: boolean) {
   if (!localSettings.value) return
@@ -549,7 +681,6 @@ useSettingsTabRuntime({
   ],
   invalidators: [
     settingsConfigRuntime.invalidate,
-    proxyRuntime.invalidate,
     userKeysRuntime.invalidate,
     backupRuntime.invalidate,
     externalSourcesRuntime.invalidate,
@@ -559,8 +690,6 @@ useSettingsTabRuntime({
     isSaving.value ||
     settingsStore.isLoading ||
     imageStorageBusy.value ||
-    proxyBusy.value ||
-    proxyRuntimeTesting.value ||
     backupBusy.value ||
     savingExternalSource.value ||
     testingExternalSource.value ||
@@ -572,3 +701,12 @@ useSettingsTabRuntime({
   ),
 })
 </script>
+
+<style scoped>
+.settings-page-panel {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+</style>

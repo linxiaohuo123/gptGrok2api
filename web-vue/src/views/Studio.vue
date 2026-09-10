@@ -71,53 +71,98 @@
         </div>
       </div>
 
-      <StudioMessageList
-        ref="messageListRef"
-        :conversation="activeConversation"
-        :conversations-count="conversations.length"
-        :task-by-id="taskById"
-        :fullscreen="isFullscreen"
-        @create="createConversation"
-        @open-history="openMobileHistory"
-        @toggle-fullscreen="toggleFullscreen"
-        @retry="retryMessage"
-        @edit="editMessage"
-        @resend="resendMessage"
-        @retry-assistant="retryAssistantMessage"
-        @delete-message="deleteMessage"
-        @copy-message="copyText"
-        @preview="openPreview"
-        @reference-image="referenceGeneratedImage"
-        @inpaint-image="openInpaintModal"
-        @compare-image="openImageCompare"
-      />
+      <div ref="studioContentRef" class="studio-content-layout">
+        <div class="studio-conversation-column">
+          <StudioMessageList
+            ref="messageListRef"
+            :conversation="activeConversation"
+            :conversations-count="conversations.length"
+            :task-by-id="taskById"
+            :file-task-by-id="fileTaskById"
+            :fullscreen="isFullscreen"
+            @create="createConversation"
+            @open-history="openMobileHistory"
+            @toggle-fullscreen="toggleFullscreen"
+            @retry="retryMessage"
+            @edit="editMessage"
+            @resend="resendMessage"
+            @resume-image-task="resumeImageTask"
+            @retry-assistant="retryAssistantMessage"
+            @delete-message="deleteMessage"
+            @copy-message="copyText"
+            @preview="openPreview"
+            @reference-image="referenceGeneratedImage"
+            @inpaint-image="openInpaintModal"
+            @compare-image="openImageCompare"
+            @open-search-sources="openSearchSourcePanel"
+          />
 
-      <StudioComposer
-        v-model:mode="composeMode"
-        v-model:text="composerText"
-        v-model:chat-model="chatModel"
-        v-model:chat-reasoning-effort="chatReasoningEffort"
-        :image-form="imageForm"
-        :chat-model-options="chatModelOptions"
-        :image-model-options="imageModelOptions"
-        :references="referenceRuntime.references.value"
-        :is-sending="isSending"
-        :is-streaming="isStreaming"
-        :is-editing="Boolean(editingMessageId)"
-        @update:image-model="imageForm.model = $event"
-        @update:image-size="imageForm.size = $event"
-        @update:image-quality="imageForm.quality = $event"
-        @update:image-count="imageForm.n = $event"
-        @submit="sendMessage"
-        @stop="stopStreaming"
-        @cancel-edit="cancelMessageEdit"
-        @add-files="appendFiles"
-        @remove-reference="referenceRuntime.remove"
-        @clear-references="referenceRuntime.clear"
-        @preview-reference="referenceRuntime.open"
-        @open-prompts="openPromptPicker"
-      />
+          <StudioComposer
+            v-model:mode="composeMode"
+            v-model:text="composerText"
+            v-model:chat-model="chatModel"
+            v-model:chat-reasoning-effort="chatReasoningEffort"
+            v-model:file-kind="fileKind"
+            :image-form="imageForm"
+            :chat-model-options="chatModelOptions"
+            :image-model-options="imageModelOptions"
+            :image-high-resolution-enabled="imageHighResolutionEnabled"
+            :references="referenceRuntime.references.value"
+            :is-sending="isSending"
+            :is-streaming="isStreaming"
+            :is-editing="Boolean(editingMessageId)"
+            @update:image-model="imageForm.model = $event"
+            @update:image-size="imageForm.size = $event"
+            @update:image-quality="imageForm.quality = $event"
+            @update:image-count="imageForm.n = $event"
+            @submit="sendMessage"
+            @stop="stopStreaming"
+            @cancel-edit="cancelMessageEdit"
+            @add-files="appendFiles"
+            @remove-reference="referenceRuntime.remove"
+            @clear-references="referenceRuntime.clear"
+            @preview-reference="referenceRuntime.open"
+            @open-prompts="openPromptPicker"
+            @open-search-skill="isSearchSkillOpen = true"
+            @open-recent-file-tasks="isRecentFileTasksOpen = true"
+          />
+        </div>
+
+        <Transition name="studio-search-sources">
+          <aside
+            v-if="activeSearchSourceMessage && isSearchSourceDocked"
+            class="studio-search-sources-dock"
+            aria-label="参考来源"
+          >
+            <div class="studio-search-sources-dock-inner">
+              <StudioSearchSourcesPanel
+                :message="activeSearchSourceMessage"
+                :highlighted-source-index="highlightedSearchSourceIndex"
+                :highlight-revision="searchSourceHighlightRevision"
+                @close="closeSearchSourcePanel"
+              />
+            </div>
+          </aside>
+        </Transition>
+      </div>
     </main>
+
+    <DrawerShell
+      :open="Boolean(activeSearchSourceMessage) && !isSearchSourceDocked"
+      max-width="22rem"
+      :z-index="220"
+      aria-label="参考来源"
+      bare
+      @close="closeSearchSourcePanel"
+    >
+      <StudioSearchSourcesPanel
+        v-if="activeSearchSourceMessage"
+        :message="activeSearchSourceMessage"
+        :highlighted-source-index="highlightedSearchSourceIndex"
+        :highlight-revision="searchSourceHighlightRevision"
+        @close="closeSearchSourcePanel"
+      />
+    </DrawerShell>
 
     <StudioMobileHistory
       :open="isMobileHistoryOpen"
@@ -150,19 +195,32 @@
       @close="isPromptPickerOpen = false"
       @select="applyPromptTemplate"
     />
+    <StudioSearchSkillModal
+      v-if="isSearchSkillOpen"
+      :open="isSearchSkillOpen"
+      @close="isSearchSkillOpen = false"
+      @copy="copyText"
+    />
+    <StudioRecentFileTasksModal
+      v-if="isRecentFileTasksOpen"
+      :open="isRecentFileTasksOpen"
+      @close="isRecentFileTasksOpen = false"
+      @deleted="handleFileTaskDeleted"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
-import { Button } from 'nanocat-ui'
-import { computed, defineAsyncComponent, onBeforeUnmount, ref } from 'vue'
-import { useSettingsStore } from '@/stores/settings'
+import { Button, DrawerShell } from 'nanocat-ui'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { preloadPromptLibrary } from '@/composables/usePromptLibraryRuntime'
 import StudioPromptPicker from '@/components/studio/StudioPromptPicker.vue'
+import StudioSearchSourcesPanel from '@/components/studio/StudioSearchSourcesPanel.vue'
+import { writeClipboardText } from '@/lib/clipboard'
 import { downloadUrlAsFile } from '@/lib/downloads'
 import {
   buildStudioConversationLookup,
@@ -179,6 +237,7 @@ import {
   useStudioConversationPersistenceRuntime,
 } from '@/views/studio/studioConversationPersistenceRuntime'
 import { useStudioConversationSelectionRuntime } from '@/views/studio/studioConversationSelectionRuntime'
+import { useStudioFileTaskRuntime } from '@/views/studio/studioFileTaskRuntime'
 import { useStudioImageTaskRuntime } from '@/views/studio/studioImageTaskRuntime'
 import { useStudioLayoutRuntime } from '@/views/studio/studioLayoutRuntime'
 import { useStudioMessageRuntime } from '@/views/studio/studioMessageRuntime'
@@ -210,21 +269,25 @@ const StudioLightbox = defineAsyncComponent(() => import('@/components/studio/St
 const StudioMobileHistory = defineAsyncComponent(() => import('@/components/studio/StudioMobileHistory.vue'))
 const StudioInpaintModal = defineAsyncComponent(() => import('@/components/studio/StudioInpaintModal.vue'))
 const StudioImageCompareModal = defineAsyncComponent(() => import('@/components/studio/StudioImageCompareModal.vue'))
+const StudioSearchSkillModal = defineAsyncComponent(() => import('@/components/studio/StudioSearchSkillModal.vue'))
+const StudioRecentFileTasksModal = defineAsyncComponent(() => import('@/components/studio/StudioRecentFileTasksModal.vue'))
 
-const settingsStore = useSettingsStore()
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
 const pageRuntime = usePageRuntime('studio')
 const composerRuntime = useStudioComposerRuntime()
 const referenceRuntime = useStudioReferenceRuntime()
 const persistedConversationState = loadStudioConversationPersistenceState()
-const modelFormRuntime = useStudioModelFormRuntime({ settingsStore })
+const modelFormRuntime = useStudioModelFormRuntime()
 
 const composeMode = composerRuntime.composeMode
 const composerText = composerRuntime.composerText
+const fileKind = composerRuntime.fileKind
 const editingMessageId = composerRuntime.editingMessageId
 const isSending = composerRuntime.isSending
 const isPromptPickerOpen = ref(false)
+const isSearchSkillOpen = ref(false)
+const isRecentFileTasksOpen = ref(false)
 const comparePreview = ref<StudioImageComparePreview | null>(null)
 const inpaintTarget = ref<{
   asset: StudioImageAssetView
@@ -232,6 +295,14 @@ const inpaintTarget = ref<{
   source: StudioImageCompareSource
 } | null>(null)
 const messageListRef = ref<StudioMessageListScroller | null>(null)
+const studioContentRef = ref<HTMLElement | null>(null)
+const searchPanelMessageId = ref('')
+const highlightedSearchSourceIndex = ref<number | null>(null)
+const searchSourceHighlightRevision = ref(0)
+const isSearchSourceDocked = ref(false)
+const SEARCH_SOURCE_DOCK_MIN_WIDTH_PX = 860
+let searchSourceHighlightTimer: number | null = null
+let searchSourceLayoutObserver: ResizeObserver | null = null
 const scrollRuntime = useStudioScrollRuntime({
   pageRuntime,
   messageListRef,
@@ -248,6 +319,7 @@ const toggleFullscreen = layoutRuntime.toggleFullscreen
 const chatModel = modelFormRuntime.chatModel
 const chatReasoningEffort = modelFormRuntime.chatReasoningEffort
 const imageForm = modelFormRuntime.imageForm
+const imageHighResolutionEnabled = modelFormRuntime.imageHighResolutionEnabled
 
 const conversations = ref<StudioConversation[]>(persistedConversationState.conversations)
 const activeConversationId = ref(persistedConversationState.activeConversationId)
@@ -266,6 +338,12 @@ const activeConversation = computed(() => {
     || conversations.value[0]
     || null
 })
+const activeSearchSourceMessage = computed(() => {
+  if (!searchPanelMessageId.value) return null
+  return activeConversation.value?.messages.find((message) => (
+    message.id === searchPanelMessageId.value && Boolean(message.searchSources?.length)
+  )) || null
+})
 const imageTaskRuntime = useStudioImageTaskRuntime({
   pageRuntime,
   activeConversation,
@@ -281,8 +359,29 @@ const imageTaskRuntime = useStudioImageTaskRuntime({
     },
   },
 })
+const fileTaskRuntime = useStudioFileTaskRuntime({
+  pageRuntime,
+  activeConversation,
+  conversationRuntimeIndex,
+  hooks: {
+    markConversationNotice,
+    touchConversation,
+    formatError: studioErrorMessage,
+    onRefreshError: (message) => {
+      toast.error(message)
+    },
+  },
+})
 const taskById = imageTaskRuntime.taskById
-const activeRunningTaskCount = imageTaskRuntime.activeRunningTaskCount
+const fileTaskById = fileTaskRuntime.taskById
+
+function handleFileTaskDeleted(taskId: string) {
+  fileTaskRuntime.markDeleted([taskId])
+}
+const activeRunningTaskCount = computed(() => {
+  if (!activeConversationId.value) return 0
+  return conversationRuntimeIndex.value.runningCounts[activeConversationId.value] || 0
+})
 const conversationBadges = imageTaskRuntime.conversationBadges
 const chatStreamRuntime = useStudioChatStreamRuntime({
   markConversationNotice,
@@ -295,12 +394,67 @@ const activeHeaderSubtitle = computed(() => {
   if (isSending.value) {
     if (composeMode.value === 'search') return '正在搜索'
     if (composeMode.value === 'image') return '正在提交图片'
+    if (composeMode.value === 'file') return '正在提交文件任务'
     return '正在请求'
   }
-  if (activeRunningTaskCount.value > 0) return `图片处理中 ${activeRunningTaskCount.value}`
+  if (activeRunningTaskCount.value > 0) return `处理中 ${activeRunningTaskCount.value}`
   const count = activeConversation.value?.messages.length || 0
   return count ? `${count} 条消息` : '准备就绪'
 })
+
+function clearSearchSourceHighlight() {
+  highlightedSearchSourceIndex.value = null
+  if (searchSourceHighlightTimer !== null) {
+    window.clearTimeout(searchSourceHighlightTimer)
+    searchSourceHighlightTimer = null
+  }
+}
+
+function closeSearchSourcePanel() {
+  searchPanelMessageId.value = ''
+  clearSearchSourceHighlight()
+}
+
+function openSearchSourcePanel(messageId: string, sourceIndex?: number) {
+  const message = activeConversation.value?.messages.find((candidate) => candidate.id === messageId)
+  const sourceCount = message?.searchSources?.length || 0
+  if (!message || !sourceCount) return
+
+  searchPanelMessageId.value = message.id
+  clearSearchSourceHighlight()
+  if (sourceIndex === undefined || sourceIndex < 0 || sourceIndex >= sourceCount) return
+
+  highlightedSearchSourceIndex.value = sourceIndex
+  searchSourceHighlightRevision.value += 1
+  searchSourceHighlightTimer = window.setTimeout(() => {
+    highlightedSearchSourceIndex.value = null
+    searchSourceHighlightTimer = null
+  }, 1600)
+}
+
+function updateSearchSourceLayout(width: number) {
+  isSearchSourceDocked.value = width >= SEARCH_SOURCE_DOCK_MIN_WIDTH_PX
+}
+
+function bindSearchSourceLayoutObserver() {
+  searchSourceLayoutObserver?.disconnect()
+  searchSourceLayoutObserver = null
+  const element = studioContentRef.value
+  if (!element) return
+
+  updateSearchSourceLayout(element.getBoundingClientRect().width)
+  if (typeof ResizeObserver === 'undefined') return
+  searchSourceLayoutObserver = new ResizeObserver(([entry]) => {
+    if (entry) updateSearchSourceLayout(entry.contentRect.width)
+  })
+  searchSourceLayoutObserver.observe(element)
+}
+
+watch(activeConversationId, closeSearchSourcePanel)
+watch(activeSearchSourceMessage, (message) => {
+  if (!message && searchPanelMessageId.value) closeSearchSourcePanel()
+})
+
 const messageRuntime = useStudioMessageRuntime({
   conversations,
   activeConversation,
@@ -327,7 +481,10 @@ const conversationActionsRuntime = useStudioConversationActionsRuntime({
   selectionRuntime: conversationSelectionRuntime,
   hooks: {
     cancelMessageEdit,
-    resetImageTasks: () => imageTaskRuntime.reset(),
+    resetTasks: () => {
+      imageTaskRuntime.reset()
+      fileTaskRuntime.reset()
+    },
     scheduleScrollToBottom,
   },
 })
@@ -337,6 +494,7 @@ const sendRuntime = useStudioSendRuntime({
   messageRuntime,
   chatStreamRuntime,
   imageTaskRuntime,
+  fileTaskRuntime,
   chatModel,
   chatReasoningEffort,
   imageForm,
@@ -447,7 +605,7 @@ function stopStreaming() {
 
 async function appendFiles(files: File[]) {
   const added = await referenceRuntime.append(files)
-  if (added && composeMode.value !== 'chat') composerRuntime.activateImageMode()
+  if (added && composeMode.value !== 'chat' && composeMode.value !== 'file') composerRuntime.activateImageMode()
 }
 
 function cleanAssetText(value: unknown) {
@@ -606,7 +764,7 @@ function openPreview(src: string, name: string, localPath = '') {
 async function copyText(value: string) {
   if (!value) return
   try {
-    await navigator.clipboard.writeText(value)
+    await writeClipboardText(value)
     toast.success('已复制')
   } catch {
     toast.error('复制失败')
@@ -639,7 +797,15 @@ function cancelScheduledScroll() {
 function stopTransientStudioUi() {
   layoutRuntime.stopSidebarResize()
   conversationSelectionRuntime.cancel()
+  closeSearchSourcePanel()
+  isSearchSkillOpen.value = false
+  isRecentFileTasksOpen.value = false
   cancelScheduledScroll()
+}
+
+async function resumeImageTask(message: StudioMessage) {
+  if (!message.taskId) return
+  await imageTaskRuntime.resumePoll(message.taskId)
 }
 
 function ensureActiveConversation() {
@@ -652,34 +818,58 @@ function ensureActiveConversation() {
 
 function initializeStudio() {
   ensureActiveConversation()
-  if (!settingsStore.settings && !settingsStore.isLoading) {
-    void settingsStore.loadSettings()
-  }
-  void modelFormRuntime.loadModelCatalog()
+  void modelFormRuntime.loadModelCatalog(true)
+  scheduleModelCatalogRefresh()
   void preloadPromptLibrary()
   void imageTaskRuntime.refresh()
+  imageTaskRuntime.schedulePoll()
+  void fileTaskRuntime.refresh()
+  fileTaskRuntime.schedulePoll()
 }
 
 function activateStudio() {
+  void modelFormRuntime.loadModelCatalog(true)
+  scheduleModelCatalogRefresh()
   void imageTaskRuntime.refresh()
   imageTaskRuntime.schedulePoll()
+  void fileTaskRuntime.refresh()
+  fileTaskRuntime.schedulePoll()
 }
 
 function deactivateStudio() {
+  cancelModelCatalogRefresh()
   imageTaskRuntime.deactivate()
+  fileTaskRuntime.deactivate()
   stopTransientStudioUi()
   conversationPersistenceRuntime.flush()
 }
 
 function disposeStudio() {
+  cancelModelCatalogRefresh()
   stopTransientStudioUi()
   imageTaskRuntime.dispose()
+  fileTaskRuntime.dispose()
   chatStreamRuntime.dispose()
   conversationPersistenceRuntime.flush()
   conversationPersistenceRuntime.dispose()
   conversationSelectionRuntime.dispose()
   layoutRuntime.dispose()
   scrollRuntime.dispose()
+}
+
+let modelCatalogRefreshTimer: number | null = null
+
+function cancelModelCatalogRefresh() {
+  if (modelCatalogRefreshTimer == null) return
+  window.clearInterval(modelCatalogRefreshTimer)
+  modelCatalogRefreshTimer = null
+}
+
+function scheduleModelCatalogRefresh() {
+  cancelModelCatalogRefresh()
+  modelCatalogRefreshTimer = window.setInterval(() => {
+    void modelFormRuntime.loadModelCatalog()
+  }, 30_000)
 }
 
 pageRuntime.onActivate(({ initial }) => {
@@ -702,7 +892,13 @@ pageRuntime.onShow(() => {
   activateStudio()
 })
 
+onMounted(() => {
+  bindSearchSourceLayoutObserver()
+})
+
 onBeforeUnmount(() => {
+  searchSourceLayoutObserver?.disconnect()
+  searchSourceLayoutObserver = null
   disposeStudio()
 })
 </script>
@@ -739,8 +935,9 @@ onBeforeUnmount(() => {
   --ui-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   display: grid;
   box-sizing: border-box;
-  height: calc(100dvh - 11rem);
-  min-height: 34rem;
+  height: auto;
+  min-height: 0;
+  flex: 1 1 0%;
   grid-template-columns: var(--studio-history-width) minmax(0, 1fr);
   gap: 0.75rem;
   overflow: hidden;
@@ -813,6 +1010,67 @@ onBeforeUnmount(() => {
   box-shadow: 0 16px 44px -36px rgba(15, 23, 42, 0.45);
 }
 
+.studio-content-layout {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.studio-conversation-column {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.studio-search-sources-dock {
+  display: flex;
+  width: 22rem;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 22rem;
+  justify-content: flex-end;
+  overflow: hidden;
+  border-left: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+}
+
+.studio-search-sources-dock-inner {
+  width: 22rem;
+  min-width: 22rem;
+  height: 100%;
+  min-height: 0;
+  flex: 0 0 22rem;
+}
+
+.studio-search-sources-enter-active,
+.studio-search-sources-leave-active {
+  transition: flex-basis 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: flex-basis;
+}
+
+.studio-search-sources-enter-active .studio-search-sources-dock-inner,
+.studio-search-sources-leave-active .studio-search-sources-dock-inner {
+  transition: opacity 160ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.studio-search-sources-enter-from,
+.studio-search-sources-leave-to {
+  flex-basis: 0;
+}
+
+.studio-search-sources-enter-from .studio-search-sources-dock-inner,
+.studio-search-sources-leave-to .studio-search-sources-dock-inner {
+  opacity: 0;
+  transform: translateX(0.75rem);
+}
+
 .chat-header-bar {
   display: flex;
   min-height: 3.5rem;
@@ -875,8 +1133,6 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1023px) {
   .studio-workspace {
-    height: calc(100dvh - 9.5rem);
-    min-height: 28rem;
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -892,6 +1148,15 @@ onBeforeUnmount(() => {
     max-width: 42vw;
   }
 
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-search-sources-enter-active,
+  .studio-search-sources-leave-active,
+  .studio-search-sources-enter-active .studio-search-sources-dock-inner,
+  .studio-search-sources-leave-active .studio-search-sources-dock-inner {
+    transition: none;
+  }
 }
 
 </style>

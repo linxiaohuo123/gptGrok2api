@@ -1,7 +1,9 @@
 <template>
   <section class="import-mode-panel">
     <p class="import-mode-panel__title">{{ title }}</p>
-    <p v-if="description" class="import-mode-panel__description">{{ description }}</p>
+    <slot name="description">
+      <p v-if="description" class="import-mode-panel__description">{{ description }}</p>
+    </slot>
     <slot />
   </section>
 </template>

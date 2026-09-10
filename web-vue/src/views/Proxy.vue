@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="space-y-6">
     <PagePanel class="space-y-5">
       <PanelHeader title="代理管理" align="start">
@@ -86,7 +86,7 @@
                 <span class="ui-field-label">备用出口代理组</span>
                 <GroupedSelectMenu
                   :model-value="selectedFallbackProxyGroupId"
-                  :options="defaultProxyGroupOptions"
+                  :options="fallbackProxyGroupOptions"
                   :disabled="loading"
                   aria-label="备用出口代理组"
                   selected-indicator="none"
@@ -148,57 +148,72 @@
           <Button size="sm" variant="primary" @click="openCreateGroupModal">新建代理组</Button>
         </template>
       </PanelHeader>
-      <PageLoadingState
-        v-if="loading && groups.length === 0"
-        title="正在加载代理组"
-        description="读取代理组、节点和健康状态。"
-      />
-      <StateBlock v-else-if="filteredGroups.length === 0">
-        <EmptyState plain title="暂无代理组" description="新建代理组后，可绑定账号组、账号或默认出口使用。" />
-      </StateBlock>
-      <TableShell v-else>
-        <table class="min-w-[1080px] w-full table-fixed text-left text-sm">
-          <colgroup>
-            <col class="w-[20%]" />
-            <col class="w-[7rem]" />
-            <col class="w-[30%]" />
-            <col class="w-[15%]" />
-            <col class="w-[16%]" />
-            <col class="w-[16rem]" />
-          </colgroup>
-          <thead class="text-xs uppercase tracking-[0.16em] text-muted-foreground">
-            <tr>
-              <th class="py-3 pr-4">代理组</th>
-              <th class="py-3 pr-4">状态</th>
-              <th class="py-3 pr-4">节点</th>
-              <th class="py-3 pr-4">引用</th>
-              <th class="py-3 pr-4">健康</th>
-              <th class="py-3 text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody class="text-sm text-foreground">
-            <ProxyGroupRow
-              v-for="group in filteredGroups"
-              :key="group.id"
-              :group="group"
-              :testing-key="testingKey"
-              :saving-group-id="savingGroupId"
-              :deleting-group-id="deletingGroupId"
-              :node-test-summary="nodeTestSummary"
-              :node-test-class="nodeTestClass"
-              @copy-reference="copyProxyGroupReference"
-              @edit="openEditGroupModal"
-              @action="handleProxyGroupAction"
-            />
-          </tbody>
-        </table>
+      <TableShell
+        unframed
+        hover-rows
+        sticky-header
+        :scroll-mode="isWorkspaceLayout ? 'contained' : 'page'"
+        :loading="loading && filteredGroups.length === 0"
+        loading-title="正在加载代理"
+        loading-description="读取代理组、节点和健康状态。"
+        :show-empty="!loading && filteredGroups.length === 0"
+        :empty-colspan="6"
+        empty-title="暂无代理组"
+        empty-description="新建代理组后，可绑定账号组、账号或默认出口使用。"
+        :scroll-class="isWorkspaceLayout ? 'max-h-[min(36rem,65dvh)]' : ''"
+        table-class="min-w-[1080px] w-full table-fixed text-left text-sm"
+        head-class="tracking-[0.16em]"
+      >
+        <template #colgroup>
+          <col class="w-[20%]" />
+          <col class="w-[7rem]" />
+          <col class="w-[30%]" />
+          <col class="w-[15%]" />
+          <col class="w-[16%]" />
+          <col class="w-[16rem]" />
+        </template>
+        <template #head>
+          <tr>
+            <th class="py-3 pr-4">代理组</th>
+            <th class="py-3 pr-4">状态</th>
+            <th class="py-3 pr-4">节点</th>
+            <th class="py-3 pr-4">引用</th>
+            <th class="py-3 pr-4">健康</th>
+            <th class="py-3 text-right">操作</th>
+          </tr>
+        </template>
+        <ProxyGroupRow
+          v-for="group in filteredGroups"
+          :key="group.id"
+          :group="group"
+          :testing-key="testingKey"
+          :saving-group-id="savingGroupId"
+          :deleting-group-id="deletingGroupId"
+          :node-test-summary="nodeTestSummary"
+          :node-test-class="nodeTestClass"
+          @copy-reference="copyProxyGroupReference"
+          @edit="openEditGroupModal"
+          @action="handleProxyGroupAction"
+        />
+        <template #footer>
+          <div class="flex justify-end pt-3">
+            <ListLayoutControl v-model="listLayoutMode" />
+          </div>
+        </template>
       </TableShell>
     </PagePanel>
 
-    <ModalShell :open="showGroupModal" max-width="56rem" :z-index="120">
+    <ModalShell
+      :open="showGroupModal"
+      :aria-label="editingGroupId ? '编辑代理组' : '新建代理组'"
+      :z-index="120"
+      :close-on-escape="!showNodeImportModal"
+      scrollable
+      @close="closeGroupModal"
+    >
       <ModalHeader
         :title="editingGroupId ? '编辑代理组' : '新建代理组'"
-        :close-disabled="savingGroupId === FORM_TEST_KEY"
+        :close-disabled="savingGroupId === FORM_TEST_KEY || closingGroupModal"
         :bordered="false"
         compact
         @close="closeGroupModal"
@@ -223,7 +238,7 @@
                     block
                     root-class="font-mono"
                     :disabled="Boolean(editingGroupId)"
-                    @update:model-value="groupForm.id = normalizeGroupId($event)"
+                    @update:model-value="groupForm.id = cleanProxyGroupDraftId($event)"
                   />
                 </label>
               </div>
@@ -243,70 +258,15 @@
               </div>
         </FormSection>
 
-        <FormSection title="代理订阅 / 批量导入" surface="plain">
-          <div class="space-y-2.5">
-            <label class="text-xs">
-              <span class="ui-field-label">订阅 URL</span>
-              <Input
-                :model-value="groupForm.subscription_url"
-                block
-                root-class="font-mono"
-                placeholder="https://example.com/proxies.txt"
-                @update:model-value="groupForm.subscription_url = $event.trim()"
-              />
-            </label>
-            <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[auto_12rem_12rem_auto]">
-              <div class="flex items-end pb-2">
-                <Checkbox v-model="groupForm.subscription_enabled">自动更新订阅</Checkbox>
-              </div>
-              <label class="text-xs">
-                <span class="ui-field-label">更新间隔（分钟）</span>
-                <Input
-                  :model-value="String(groupForm.subscription_interval_minutes)"
-                  block
-                  type="number"
-                  min="5"
-                  max="1440"
-                  @update:model-value="groupForm.subscription_interval_minutes = Math.max(5, Math.min(1440, Number($event || 30)))"
-                />
-              </label>
-              <label class="text-xs">
-                <span class="ui-field-label">订阅节点图片并发</span>
-                <Input
-                  :model-value="String(groupForm.subscription_node_image_concurrency_limit)"
-                  block
-                  type="number"
-                  min="0"
-                  @update:model-value="groupForm.subscription_node_image_concurrency_limit = normalizeImageConcurrencyLimit($event)"
-                />
-              </label>
-              <div class="flex items-end pb-1">
-                <Button
-                  size="xs"
-                  variant="outline"
-                  :disabled="!editingGroupId || !groupForm.subscription_url || refreshingGroupId === editingGroupId"
-                  @click="refreshProxyGroupSubscription()"
-                >
-                  {{ refreshingGroupId === editingGroupId ? '拉取中...' : '立即拉取' }}
-                </Button>
-              </div>
-            </div>
-            <p class="text-xs text-muted-foreground">
-              支持 http、https、socks4、socks5；纯 host:port 默认按 HTTP。自动更新只替换订阅节点，手工节点会保留。
-            </p>
-            <p v-if="groupForm.subscription_last_updated_at" class="text-xs text-emerald-600">
-              最近更新：{{ groupForm.subscription_last_updated_at }} · {{ groupForm.subscription_node_count }} 个订阅节点
-            </p>
-            <p v-if="groupForm.subscription_last_error" class="break-all text-xs text-rose-600">
-              最近错误：{{ groupForm.subscription_last_error }}
-            </p>
-          </div>
-        </FormSection>
-
               <div class="space-y-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <p class="text-xs font-medium text-foreground">代理节点</p>
-                  <Button size="xs" variant="outline" @click="addGroupNode">添加节点</Button>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <Button size="xs" variant="outline" @click="openNodeImportModal">
+                      批量添加节点
+                    </Button>
+                    <Button size="xs" variant="outline" @click="addGroupNode">添加节点</Button>
+                  </div>
                 </div>
                 <div class="space-y-3">
                   <FormSection
@@ -364,10 +324,10 @@
                         <Button
                           size="xs"
                           variant="outline"
-                          :disabled="!editingGroupId || !node.url || testingKey === `group:${editingGroupId}:${node.id}`"
-                          @click="testProxyGroupNode({ id: editingGroupId, name: groupForm.name }, node)"
+                          :disabled="!node.url || testingKey === `group:${editingGroupId || groupForm.id || FORM_TEST_KEY}:${node.id}`"
+                          @click="testProxyGroupNode({ id: editingGroupId || groupForm.id || FORM_TEST_KEY, name: groupForm.name }, node)"
                         >
-                          {{ testingKey === `group:${editingGroupId}:${node.id}` ? '检测中...' : '检测' }}
+                          {{ testingKey === `group:${editingGroupId || groupForm.id || FORM_TEST_KEY}:${node.id}` ? '检测中...' : '检测' }}
                         </Button>
                         <Button size="xs" variant="outline" root-class="text-rose-600" @click="removeGroupNode(index)">
                           删除
@@ -380,7 +340,7 @@
       </ModalBody>
 
       <ModalFooter :bordered="false">
-        <Button size="xs" variant="outline" root-class="min-w-14 justify-center" :disabled="savingGroupId === FORM_TEST_KEY" @click="closeGroupModal">
+        <Button size="xs" variant="outline" root-class="min-w-14 justify-center" :disabled="savingGroupId === FORM_TEST_KEY || closingGroupModal" @click="closeGroupModal">
           取消
         </Button>
         <Button size="xs" variant="primary" root-class="min-w-14 justify-center" :disabled="savingGroupId === FORM_TEST_KEY" @click="saveProxyGroup">
@@ -389,24 +349,53 @@
       </ModalFooter>
     </ModalShell>
 
+    <ProxyNodeImportModal
+      :open="showNodeImportModal"
+      :group-name="groupForm.name || groupForm.id"
+      :existing-urls="groupNodeImportExistingUrls"
+      @close="closeNodeImportModal"
+      @apply="applyNodeImport"
+    />
+
+    <OperationProgressDrawer
+      :open="operationProgress.open"
+      :title="operationProgress.title"
+      :subtitle="operationProgress.subtitle"
+      :total="operationProgress.total"
+      :current="operationProgress.current"
+      :status-label="operationProgress.statusLabel"
+      :error="operationProgress.error"
+      :busy="operationProgress.busy"
+      :tone="operationProgress.tone"
+      :events="operationProgress.events"
+      @close="closeOperationProgress"
+    />
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
+import { Icon } from '@iconify/vue'
+import {
+  Button,
+  Checkbox,
+  GroupedSelectMenu,
+  Input,
+  TableShell,
+} from 'nanocat-ui'
 import ActionRow from '@/components/ai/ActionRow.vue'
+import ListLayoutControl from '@/components/ai/ListLayoutControl.vue'
 import FormSection from '@/components/ai/FormSection.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
-import PageLoadingState from '@/components/ai/PageLoadingState.vue'
+import OperationProgressDrawer from '@/components/ai/OperationProgressDrawer.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import PanelHeader from '@/components/ai/PanelHeader.vue'
-import StateBlock from '@/components/ai/StateBlock.vue'
-import TableShell from '@/components/ai/TableShell.vue'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
+import { usePageVisibilityReload } from '@/composables/usePageQuery'
 import { usePageRuntime } from '@/composables/usePageRuntime'
+import { useListLayoutPreference } from '@/composables/useListLayoutPreference'
 import {
   defaultProxyModeOptions,
   fallbackProxyModeOptions,
@@ -414,34 +403,42 @@ import {
 import { DEFAULT_TEST_KEY, useProxyDefaultRuntime } from '@/views/proxy/proxyDefaultRuntime'
 import {
   FORM_TEST_KEY,
-  normalizeGroupId,
+  cleanProxyGroupDraftId,
   normalizeImageConcurrencyLimit,
   useProxyGroupRuntime,
 } from '@/views/proxy/proxyGroupRuntime'
 import ProxyGroupRow from '@/views/proxy/ProxyGroupRow.vue'
+import ProxyNodeImportModal from '@/views/proxy/ProxyNodeImportModal.vue'
 
 defineOptions({ name: 'Proxy' })
 
+const { listLayoutMode, isWorkspaceLayout } = useListLayoutPreference()
 const proxyGroupsRuntime = useProxyGroupRuntime()
 const savingGroupId = proxyGroupsRuntime.savingGroupId
 const deletingGroupId = proxyGroupsRuntime.deletingGroupId
-const refreshingGroupId = proxyGroupsRuntime.refreshingGroupId
 const testingKey = proxyGroupsRuntime.testingKey
+const operationProgress = proxyGroupsRuntime.operationProgress
+const closeOperationProgress = proxyGroupsRuntime.closeOperationProgress
 const groupKeyword = proxyGroupsRuntime.groupKeyword
 const showGroupModal = proxyGroupsRuntime.showGroupModal
+const showNodeImportModal = proxyGroupsRuntime.showNodeImportModal
+const closingGroupModal = proxyGroupsRuntime.closingGroupModal
 const editingGroupId = proxyGroupsRuntime.editingGroupId
 const groups = proxyGroupsRuntime.groups
 const groupForm = proxyGroupsRuntime.groupForm
+const groupNodeImportExistingUrls = proxyGroupsRuntime.groupNodeImportExistingUrls
 const filteredGroups = proxyGroupsRuntime.filteredGroups
 const updateGroups = proxyGroupsRuntime.updateGroups
 const copyProxyGroupReference = proxyGroupsRuntime.copyProxyGroupReference
 const openCreateGroupModal = proxyGroupsRuntime.openCreateGroupModal
 const openEditGroupModal = proxyGroupsRuntime.openEditGroupModal
 const closeGroupModal = proxyGroupsRuntime.closeGroupModal
+const openNodeImportModal = proxyGroupsRuntime.openNodeImportModal
+const closeNodeImportModal = proxyGroupsRuntime.closeNodeImportModal
 const addGroupNode = proxyGroupsRuntime.addGroupNode
 const removeGroupNode = proxyGroupsRuntime.removeGroupNode
+const applyNodeImport = proxyGroupsRuntime.applyNodeImport
 const saveProxyGroup = proxyGroupsRuntime.saveProxyGroup
-const refreshProxyGroupSubscription = proxyGroupsRuntime.refreshProxyGroupSubscription
 const handleProxyGroupAction = proxyGroupsRuntime.handleProxyGroupAction
 const testProxyGroupNode = proxyGroupsRuntime.testProxyGroupNode
 const nodeTestSummary = proxyGroupsRuntime.nodeTestSummary
@@ -465,6 +462,8 @@ const selectedFallbackProxyGroupId = proxyDefaultRuntime.selectedFallbackProxyGr
 const fallbackCustomProxyInput = proxyDefaultRuntime.fallbackCustomProxyInput
 const defaultTestResult = proxyDefaultRuntime.defaultTestResult
 const defaultProxyGroupOptions = proxyDefaultRuntime.defaultProxyGroupOptions
+const fallbackProxyGroupOptions = proxyDefaultRuntime.fallbackProxyGroupOptions
+const effectiveDefault = proxyDefaultRuntime.effectiveDefault
 const canTestDefaultProxy = proxyDefaultRuntime.canTestDefaultProxy
 const isDefaultProxyDirty = proxyDefaultRuntime.isDefaultProxyDirty
 const setDefaultProxyMode = proxyDefaultRuntime.setDefaultProxyMode
@@ -482,25 +481,33 @@ function deactivateProxyView() {
   proxyDefaultRuntime.invalidate()
 }
 
+function shouldSkipProxyRefresh() {
+  return Boolean(
+    showGroupModal.value
+    || savingDefaultProxy.value
+    || savingGroupId.value
+    || testingKey.value
+    || isDefaultProxyDirty.value,
+  )
+}
+
+usePageVisibilityReload({
+  runtime: pageRuntime,
+  invalidate: deactivateProxyView,
+  reload: loadData,
+  shouldReload: () => !shouldSkipProxyRefresh(),
+})
+
 pageRuntime.onActivate(({ initial }) => {
   if (initial) {
     void loadData()
     return
   }
-  if (showGroupModal.value || savingDefaultProxy.value || savingGroupId.value || testingKey.value || isDefaultProxyDirty.value) return
+  if (shouldSkipProxyRefresh()) return
   void loadData()
 })
 
 pageRuntime.onDeactivate(() => {
   deactivateProxyView()
-})
-
-pageRuntime.onHide(() => {
-  deactivateProxyView()
-})
-
-pageRuntime.onShow(() => {
-  if (showGroupModal.value || savingDefaultProxy.value || savingGroupId.value || testingKey.value || isDefaultProxyDirty.value) return
-  void loadData()
 })
 </script>

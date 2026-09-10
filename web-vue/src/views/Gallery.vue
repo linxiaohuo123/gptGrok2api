@@ -1,5 +1,5 @@
 <template>
-  <div class="gallery-page">
+  <div class="gallery-page" :class="{ 'gallery-page--contained': isWorkspaceLayout }">
     <PagePanel class="gallery-hero">
       <PanelHeader title="图片管理">
         <template #actions>
@@ -42,14 +42,21 @@
       </FilterToolbar>
     </PagePanel>
 
-    <PagePanel flush>
+    <PagePanel
+      flush
+      class="gallery-results-panel"
+      :class="{ 'gallery-results-panel--contained': isWorkspaceLayout }"
+    >
       <div class="gallery-content-toolbar">
         <div class="flex min-w-0 items-center gap-3">
           <Checkbox
             :model-value="allVisibleSelected"
+            :indeterminate="someVisibleSelected"
             :disabled="files.length === 0 || isLoading"
             @update:model-value="toggleSelectAllVisible"
-          />
+          >
+            <span class="sr-only">全选当前视图图片</span>
+          </Checkbox>
           <div class="min-w-0">
             <p class="ui-section-kicker">当前视图</p>
             <p class="mt-1 text-xs text-muted-foreground">{{ paginationSummary }}</p>
@@ -102,7 +109,11 @@
         </template>
       </StateBlock>
 
-      <div v-else class="space-y-4 p-4 lg:p-5">
+      <div
+        v-else
+        class="gallery-results scrollbar-slim"
+        :class="{ 'gallery-results--contained': isWorkspaceLayout }"
+      >
         <div class="image-grid">
           <GalleryImageCard
             v-for="file in files"
@@ -114,35 +125,41 @@
             :copied="copiedFileKey === file.path"
             :image-url="galleryCardImageUrl(file)"
             :storage-label="storageLabel(file)"
-            :size-label="formatSize(file.size)"
+            :size-label="formatSize(file.size_bytes)"
             :dimensions="formatDimensions(file)"
             :time-remaining="galleryCardTimeRemaining(file)"
+            :genbox-push-enabled="genboxPushEnabled"
+            :genbox-busy="genboxPushBusyPath === file.path"
+            :genbox-status-label="genboxStatusLabel(file)"
             @preview="openPreview"
             @select="handleCardSelect"
             @image-error="handleCardImageError"
             @copy="copyFileLink"
             @edit-tags="openTagEditor"
             @download="downloadFile"
+            @genbox-push="handleGenBoxPush"
             @delete="handleDelete"
             @tag-click="setTagFilter"
           />
         </div>
-
-        <ListPagination
-          v-model:page="currentPage"
-          v-model:page-size="pageSize"
-          :total-count="totalItems"
-          :page-size-options="galleryPageSizeOptions"
-          unit="张图片"
-          :disabled="isLoading"
-        />
       </div>
+
+      <ListPagination
+        v-model:page="currentPage"
+        v-model:page-size="pageSize"
+        v-model:layout-mode="listLayoutMode"
+        class="gallery-pagination"
+        :total-count="totalItems"
+        :page-size-options="galleryPageSizeOptions"
+        unit="张图片"
+        :disabled="isLoading"
+      />
     </PagePanel>
 
     <GalleryLightbox
       :file="previewFile"
       :image-url="previewFile ? getFileUrl(previewFile.url) : ''"
-      :size-label="previewFile ? formatSize(previewFile.size) : ''"
+      :size-label="previewFile ? formatSize(previewFile.size_bytes) : ''"
       :copied="Boolean(previewFile && copiedFileKey === previewFile.path)"
       @close="closePreview"
       @download="downloadFile"
@@ -164,32 +181,23 @@
       @update:draft="tagDraft = $event"
     />
 
-    <SelectionBulkBar
-      :selected-count="selectedCount"
-      :summary-text="`已选择 ${selectedCount} 张图片`"
-      density="compact"
-    >
-      <Button size="xs" variant="outline" :disabled="batchBusy" @click="handleBatchDownload">下载 zip</Button>
-      <Button size="xs" variant="outline" :disabled="batchBusy" @click="handleDeleteSelected">删除</Button>
-      <Button size="xs" variant="ghost" :disabled="batchBusy" @click="clearSelection">取消</Button>
-    </SelectionBulkBar>
-
-    <OperationProgressModal
+    <OperationProgressDrawer
       :open="operationProgress.open"
       :title="operationProgress.title"
       :subtitle="operationProgress.subtitle"
       :total="operationProgress.total"
       :current="operationProgress.current"
       :status-label="operationProgress.statusLabel"
-      :message="operationProgress.message"
       :error="operationProgress.error"
       :busy="operationProgress.busy"
-      @close="operationProgress.open = false"
+      :tone="operationProgress.tone"
+      :events="operationProgress.events"
+      @close="closeOperationProgress"
     />
 
     <ModalShell
       :open="isStorageModalOpen"
-      max-width="38rem"
+      aria-label="图片存储管理"
       close-on-backdrop
       @close="closeStorageModal"
     >
@@ -200,7 +208,7 @@
             <h3>存储管理</h3>
             <p>查看图片占用、磁盘剩余空间，并执行简单清理。</p>
           </div>
-          <ModalCloseButton label="关闭存储管理" @click="closeStorageModal" />
+          <CloseButton label="关闭存储管理" @click="closeStorageModal" />
         </header>
 
         <ModalBody density="normal">
@@ -242,17 +250,14 @@
               <span>按目标剩余空间清理</span>
               <p>输入希望保留的磁盘剩余空间，系统会从旧图片开始清理。</p>
             </div>
-            <div class="gallery-storage-target-field">
-              <Input
-                :model-value="targetFreeMb"
-                type="number"
-                min="1"
-                placeholder="500"
-                root-class="gallery-storage-target-input"
-                @update:model-value="targetFreeMb = String($event)"
-              />
-              <span class="gallery-storage-target-unit">MB</span>
-            </div>
+            <Input
+              :model-value="targetFreeMb"
+              type="number"
+              min="1"
+              placeholder="500"
+              root-class="gallery-storage-target-input"
+              @update:model-value="targetFreeMb = String($event)"
+            />
             <div class="gallery-storage-target-actions">
               <Button size="sm" variant="ghost" :disabled="isStorageBusy" @click="handleCleanupToTarget(true)">
                 预估
@@ -290,7 +295,7 @@ import {
   type GalleryFile,
   type ImageStorageStats,
 } from '@/api/gallery'
-import { Button, Checkbox, Input } from 'nanocat-ui'
+import { Button, Checkbox, CloseButton, GroupedSelectMenu, Input } from 'nanocat-ui'
 import ActionRow from '@/components/ai/ActionRow.vue'
 import DateRangeInputs from '@/components/ai/DateRangeInputs.vue'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
@@ -298,18 +303,16 @@ import GalleryImageCard from '@/components/ai/GalleryImageCard.vue'
 import ListPagination from '@/components/ai/ListPagination.vue'
 import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
-import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import PanelHeader from '@/components/ai/PanelHeader.vue'
-import SelectionBulkBar from '@/components/ai/SelectionBulkBar.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { usePageRuntime } from '@/composables/usePageRuntime'
+import { useListLayoutPreference } from '@/composables/useListLayoutPreference'
 import { useGalleryFileActions } from '@/composables/useGalleryFileActions'
 import { useGalleryInteractionRuntime } from '@/views/gallery/galleryInteractionRuntime'
 import { useGalleryOperationsRuntime } from '@/views/gallery/galleryOperationsRuntime'
@@ -322,6 +325,7 @@ import {
   formatStorageUsagePercent,
   formatTimeRemaining,
   galleryFileCardSignature,
+  genboxStatusLabel,
   galleryPageSizeOptions,
   storageUsageBarWidth as getStorageUsageBarWidth,
   storageLabel,
@@ -331,10 +335,11 @@ defineOptions({ name: 'Gallery' })
 
 const GalleryLightbox = defineAsyncComponent(() => import('@/components/ai/GalleryLightbox.vue'))
 const GalleryTagEditorModal = defineAsyncComponent(() => import('@/components/ai/GalleryTagEditorModal.vue'))
-const OperationProgressModal = defineAsyncComponent(() => import('@/components/ai/OperationProgressModal.vue'))
+const OperationProgressDrawer = defineAsyncComponent(() => import('@/components/ai/OperationProgressDrawer.vue'))
 
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
+const { listLayoutMode, isWorkspaceLayout } = useListLayoutPreference()
 
 const storageStats = ref<ImageStorageStats | null>(null)
 
@@ -357,6 +362,7 @@ const endDate = galleryQueryRuntime.endDate
 const pageSize = galleryQueryRuntime.pageSize
 const counts = galleryQueryRuntime.counts
 const allTags = galleryQueryRuntime.allTags
+const genboxPushEnabled = galleryQueryRuntime.genboxPushEnabled
 const tagOptions = galleryQueryRuntime.tagOptions
 const currentPage = galleryQueryRuntime.currentPage
 const totalItems = galleryQueryRuntime.totalItems
@@ -376,7 +382,6 @@ const copiedFileKey = fileActions.copiedFileKey
 const galleryInteractions = useGalleryInteractionRuntime({
   toast,
   files,
-  allTags,
   tagFilter,
   loadGallery,
   resetAndLoad,
@@ -388,6 +393,7 @@ const tagDraft = galleryInteractions.tagDraft
 const selectedPaths = galleryInteractions.selectedPaths
 const selectedCount = galleryInteractions.selectedCount
 const allVisibleSelected = galleryInteractions.allVisibleSelected
+const someVisibleSelected = galleryInteractions.someVisibleSelected
 const draftTags = galleryInteractions.draftTags
 const openPreview = galleryInteractions.openPreview
 const closePreview = galleryInteractions.closePreview
@@ -427,6 +433,7 @@ const {
   storageActionError,
   targetFreeMb,
   operationProgress,
+  closeOperationProgress,
   refreshStorageStats,
   openStorageModal,
   closeStorageModal,
@@ -436,6 +443,8 @@ const {
   handleDelete,
   handleDeleteSelected,
   handleBatchDownload,
+  genboxPushBusyPath,
+  handleGenBoxPush,
 } = galleryOperations
 
 function getFileUrl(url: string) {
@@ -457,9 +466,11 @@ function galleryCardSignature(file: GalleryFile) {
     copied: copiedFileKey.value === file.path,
     imageUrl: galleryCardImageUrl(file),
     storageLabel: storageLabel(file),
-    sizeLabel: formatSize(file.size),
+    sizeLabel: formatSize(file.size_bytes),
     dimensions: formatDimensions(file),
     timeRemaining: galleryCardTimeRemaining(file),
+    genboxPushEnabled: genboxPushEnabled.value,
+    genboxBusy: genboxPushBusyPath.value === file.path,
   })
 }
 
@@ -524,6 +535,14 @@ pageRuntime.onShow(() => {
   gap: 16px;
 }
 
+@media (min-width: 1024px) {
+  .gallery-page--contained {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+}
+
 .gallery-hero {
   display: flex;
   flex-direction: column;
@@ -574,6 +593,48 @@ pageRuntime.onShow(() => {
   padding: 14px 16px;
   border-bottom: 1px solid hsl(var(--border));
   background: hsl(var(--card));
+}
+
+.gallery-results-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.gallery-results-panel--contained {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.gallery-results {
+  padding: 16px;
+}
+
+.gallery-results--contained {
+  min-height: 0;
+  max-height: min(36rem, 60dvh);
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.gallery-pagination {
+  flex: 0 0 auto;
+  padding: 12px 16px 16px;
+}
+
+@media (min-width: 1024px) {
+  .gallery-results {
+    padding: 20px;
+  }
+
+  .gallery-results--contained {
+    max-height: none;
+  }
+
+  .gallery-pagination {
+    padding-inline: 20px;
+  }
 }
 
 .gallery-state-block {
@@ -736,19 +797,6 @@ pageRuntime.onShow(() => {
 
 :deep(.gallery-storage-target-input) {
   min-width: 0;
-}
-
-.gallery-storage-target-field {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.gallery-storage-target-unit {
-  flex: none;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.75rem;
-  font-weight: 600;
 }
 
 .gallery-storage-target-actions {

@@ -10,6 +10,7 @@
         message.isImageMessage ? 'is-image-message' : '',
         message.isPendingImageMessage ? 'is-pending-image-message' : '',
         message.isSingleImageResult ? 'is-single-image-result' : '',
+        message.role === 'assistant' && message.mode === 'file' ? 'is-file-message' : '',
         isCodeMessage(message) ? 'is-code-message' : '',
       ]"
       :style="message.imagePreviewStyle"
@@ -56,7 +57,7 @@
             message.role === 'user' ? 'chat-message-bubble-user' : 'chat-message-bubble-assistant',
             message.isImageMessage ? 'chat-message-bubble-image' : '',
             message.isPendingImageMessage ? 'chat-message-bubble-image-pending' : '',
-            message.status === 'error' ? 'chat-message-bubble-error' : '',
+            (message.fileTask ? message.fileTask.status === 'error' : message.status === 'error') ? 'chat-message-bubble-error' : '',
           ]"
         >
           <div
@@ -64,7 +65,7 @@
             :class="{
               'is-collapsible': message.isCollapsible,
               'is-collapsed': message.isCollapsed,
-              'is-markdown': message.role !== 'user' && message.mode !== 'image',
+              'is-markdown': message.role !== 'user' && message.mode !== 'image' && message.mode !== 'file',
             }"
           >
             <template v-if="message.role === 'user'">
@@ -72,6 +73,54 @@
               <div v-if="message.attachments?.length && !message.referenceImages?.length" class="studio-attachment-line">
                 <Icon icon="lucide:paperclip" class="h-3.5 w-3.5" />
                 {{ message.attachments.join('、') }}
+              </div>
+            </template>
+
+            <template v-else-if="message.mode === 'file'">
+              <div class="studio-file-task" :class="`is-${fileTaskStatus(message)}`">
+                <div class="studio-file-task-icon" aria-hidden="true">
+                  <Icon
+                    :icon="message.fileTaskDeleted
+                      ? 'lucide:file-x-2'
+                      : fileTaskStatus(message) === 'error'
+                      ? 'lucide:circle-alert'
+                      : fileTaskStatus(message) === 'success'
+                        ? 'lucide:file-check-2'
+                        : 'lucide:loader-circle'"
+                    :class="['h-4 w-4', { 'animate-spin': isFileTaskPending(message) }]"
+                  />
+                </div>
+                <div class="studio-file-task-body">
+                  <strong>{{ fileTaskTitle(message) }}</strong>
+                  <span v-if="message.fileTaskDeleted">任务记录和本地文件已删除。</span>
+                  <p v-else-if="fileTaskStatus(message) === 'error'">
+                    {{ fileTaskError(message) }}
+                  </p>
+                  <span v-else-if="isFileTaskPending(message)">{{ fileTaskStatusText(message) }}</span>
+                  <span v-else-if="!message.fileTask">正在读取下载地址</span>
+                  <span v-else>可下载源文件或完整压缩包。</span>
+
+                  <div v-if="message.fileTask?.status === 'success'" class="studio-file-task-actions">
+                    <button
+                      type="button"
+                      class="studio-file-task-action"
+                      :disabled="isDownloadingFileTask"
+                      @click="handleFileTaskDownload(message, message.fileTask.result.primary_url, 'file')"
+                    >
+                      <Icon icon="lucide:download" class="h-3.5 w-3.5" />
+                      下载 {{ fileKindLabel(message) }}
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-file-task-action"
+                      :disabled="isDownloadingFileTask"
+                      @click="handleFileTaskDownload(message, message.fileTask.result.zip_url, 'zip')"
+                    >
+                      <Icon icon="lucide:archive" class="h-3.5 w-3.5" />
+                      下载 ZIP
+                    </button>
+                  </div>
+                </div>
               </div>
             </template>
 
@@ -127,99 +176,113 @@
             </template>
 
             <template v-else>
-              <template v-if="!message.task || message.task.status === 'queued' || message.task.status === 'running'">
-                <div class="studio-result-block studio-result-block-pending">
-                  <div class="studio-result-grid" :class="{ 'is-single': message.imageSlotCount <= 1 }">
-                    <div
-                      v-for="slot in message.pendingSlots"
-                      :key="`${message.id}-pending-${slot}`"
-                      class="studio-result-item"
+              <div
+                v-if="isImageMessageWithoutResult(message)"
+                class="studio-image-status"
+                :class="{ 'is-error': message.task?.status === 'failed' }"
+              >
+                <Icon :icon="message.task?.status === 'text_review' ? 'lucide:message-square-text' : 'lucide:circle-alert'" class="h-4 w-4" />
+                <span>{{ message.primaryMessage || message.error || '上游没有返回可用图片。' }}</span>
+              </div>
+
+              <div
+                v-else
+                class="studio-result-block"
+                :class="{ 'studio-result-block-pending': message.pendingSlots.length > 0 }"
+              >
+                <div class="studio-result-grid" :class="{ 'is-single': message.imageSlotCount <= 1 }">
+                  <div
+                    v-for="(asset, assetIndex) in message.assets"
+                    :key="`${message.id}-${assetIndex}`"
+                    class="studio-result-item"
+                  >
+                    <button
+                      type="button"
+                      class="studio-result-media"
+                      :class="{ 'has-image': Boolean(asset.url) }"
+                      @click="$emit('preview', asset.url, `结果 ${assetIndex + 1}`, asset.path)"
                     >
-                      <div class="studio-result-media studio-result-placeholder">
-                        <Icon icon="lucide:loader-circle" class="h-5 w-5 animate-spin" />
-                        <span>正在处理图片</span>
-                        <small>{{ message.imagePendingStageText }}</small>
-                      </div>
-                      <div v-if="message.imageSlotCount > 1" class="studio-result-caption">
-                        <span>图片 {{ slot + 1 }}</span>
+                      <img
+                        v-if="asset.url"
+                        :src="asset.url"
+                        :alt="`结果 ${assetIndex + 1}`"
+                        :width="asset.width || undefined"
+                        :height="asset.height || undefined"
+                        loading="lazy"
+                      />
+                      <span v-else>无图片 URL</span>
+                    </button>
+                    <div v-if="asset.url" class="studio-result-caption">
+                      <span v-if="message.imageSlotCount > 1" class="studio-result-caption-label">结果 {{ assetIndex + 1 }}</span>
+                      <div class="studio-result-actions">
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          root-class="studio-result-action"
+                          title="引用到输入框"
+                          aria-label="引用到输入框"
+                          @click="$emit('reference-image', asset, `结果 ${assetIndex + 1}`, message)"
+                        >
+                          <Icon icon="lucide:image-plus" class="h-3.5 w-3.5" />
+                          <span>引用</span>
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          root-class="studio-result-action"
+                          title="局部修改"
+                          aria-label="局部修改"
+                          @click="$emit('inpaint-image', asset, `结果 ${assetIndex + 1}`, message)"
+                        >
+                          <Icon icon="lucide:scan-line" class="h-3.5 w-3.5" />
+                          <span>局部</span>
+                        </Button>
+                        <Button
+                          v-if="message.inpaintSource"
+                          size="xs"
+                          variant="outline"
+                          root-class="studio-result-action"
+                          title="对比原图"
+                          aria-label="对比原图"
+                          @click="$emit('compare-image', message.inpaintSource, asset, `结果 ${assetIndex + 1}`)"
+                        >
+                          <Icon icon="lucide:columns-2" class="h-3.5 w-3.5" />
+                          <span>对比</span>
+                        </Button>
                       </div>
                     </div>
                   </div>
-                </div>
-              </template>
 
-              <template v-else>
-                <div v-if="message.task?.status === 'error'" class="studio-image-status is-error">
-                  <Icon icon="lucide:circle-alert" class="h-4 w-4" />
-                  <span>{{ message.primaryMessage || '上游没有返回可用图片。' }}</span>
-                </div>
+                  <div
+                    v-for="slot in message.pendingSlots"
+                    :key="`${message.id}-pending-${slot}`"
+                    class="studio-result-item"
+                  >
+                    <div class="studio-result-media studio-result-placeholder">
+                      <Icon icon="lucide:loader-circle" class="h-5 w-5 animate-spin" />
+                      <span>正在处理图片</span>
+                      <small>{{ message.imagePendingStageText }}</small>
+                    </div>
+                    <div v-if="message.imageSlotCount > 1" class="studio-result-caption">
+                      <span>图片 {{ slot + 1 }}</span>
+                    </div>
+                  </div>
 
-                <div v-else class="studio-result-block">
-                  <div class="studio-result-grid" :class="{ 'is-single': message.assets.length <= 1 }">
-                    <div
-                      v-for="(asset, assetIndex) in message.assets"
-                      :key="`${message.id}-${assetIndex}`"
-                      class="studio-result-item"
-                    >
-                      <button
-                        type="button"
-                        class="studio-result-media"
-                        :class="{ 'has-image': Boolean(asset.url) }"
-                        @click="$emit('preview', asset.url, `结果 ${assetIndex + 1}`, asset.path)"
-                      >
-                        <img
-                          v-if="asset.url"
-                          :src="asset.url"
-                          :alt="`结果 ${assetIndex + 1}`"
-                          :width="asset.width || undefined"
-                          :height="asset.height || undefined"
-                          loading="lazy"
-                        />
-                        <span v-else>无图片 URL</span>
-                      </button>
-                      <div v-if="asset.url" class="studio-result-caption">
-                        <span v-if="message.assets.length > 1" class="studio-result-caption-label">结果 {{ assetIndex + 1 }}</span>
-                        <div class="studio-result-actions">
-                          <Button
-                            size="xs"
-                            variant="outline"
-                            root-class="studio-result-action"
-                            title="引用到输入框"
-                            aria-label="引用到输入框"
-                            @click="$emit('reference-image', asset, `结果 ${assetIndex + 1}`, message)"
-                          >
-                            <Icon icon="lucide:image-plus" class="h-3.5 w-3.5" />
-                            <span>引用</span>
-                          </Button>
-                          <Button
-                            size="xs"
-                            variant="outline"
-                            root-class="studio-result-action"
-                            title="局部修改"
-                            aria-label="局部修改"
-                            @click="$emit('inpaint-image', asset, `结果 ${assetIndex + 1}`, message)"
-                          >
-                            <Icon icon="lucide:scan-line" class="h-3.5 w-3.5" />
-                            <span>局部</span>
-                          </Button>
-                          <Button
-                            v-if="message.inpaintSource"
-                            size="xs"
-                            variant="outline"
-                            root-class="studio-result-action"
-                            title="对比原图"
-                            aria-label="对比原图"
-                            @click="$emit('compare-image', message.inpaintSource, asset, `结果 ${assetIndex + 1}`)"
-                          >
-                            <Icon icon="lucide:columns-2" class="h-3.5 w-3.5" />
-                            <span>对比</span>
-                          </Button>
-                        </div>
-                      </div>
+                  <div
+                    v-for="slot in message.failedSlots"
+                    :key="`${message.id}-failed-${slot}`"
+                    class="studio-result-item"
+                  >
+                    <div class="studio-result-media studio-result-placeholder studio-result-placeholder-failed">
+                      <Icon icon="lucide:circle-x" class="h-5 w-5" />
+                      <span>未生成</span>
+                    </div>
+                    <div v-if="message.imageSlotCount > 1" class="studio-result-caption">
+                      <span>图片 {{ slot + 1 }}</span>
                     </div>
                   </div>
                 </div>
-              </template>
+              </div>
             </template>
           </div>
 
@@ -258,12 +321,18 @@
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
 import type { CSSProperties } from 'vue'
+import type { EditableFileTask } from '@/api/editableFileTasks'
 import type { ImageTask } from '@/api/imageTasks'
+import { useToast } from '@/composables/useToast'
 import { hasStudioCodeContent } from '@/lib/studioMarkdownRenderer'
+import {
+  useEditableFileTaskDownload,
+  type EditableFileTaskDownloadType,
+} from './editableFileTaskView'
 import StudioMarkdownContent from './StudioMarkdownContent.vue'
 import type { StudioImageAssetView, StudioImageCompareSource, StudioMessage } from './types'
 
-export type StudioMessageActionKey = 'copy' | 'edit' | 'resend' | 'fill' | 'retry' | 'delete'
+export type StudioMessageActionKey = 'copy' | 'edit' | 'resend' | 'fill' | 'resume-poll' | 'retry' | 'delete'
 
 export interface StudioMessageAction {
   key: StudioMessageActionKey
@@ -275,12 +344,14 @@ export interface StudioMessageAction {
 export type StudioMessageView = StudioMessage & {
   memoKey: string
   task?: ImageTask
+  fileTask?: EditableFileTask
   assets: StudioImageAssetView[]
   isImageMessage: boolean
   isPendingImageMessage: boolean
   isSingleImageResult: boolean
   imageSlotCount: number
   pendingSlots: number[]
+  failedSlots: number[]
   imagePendingStageText: string
   primaryMessage: string
   imagePreviewStyle?: CSSProperties
@@ -305,6 +376,14 @@ defineEmits<{
   'compare-image': [source: StudioImageCompareSource, asset: StudioImageAssetView, name: string]
 }>()
 
+const toast = useToast()
+const {
+  isDownloading: isDownloadingFileTask,
+  download: downloadFileTask,
+} = useEditableFileTaskDownload({
+  onError: (message) => toast.error(message),
+})
+
 function actionsForMessage(message: StudioMessageView): StudioMessageAction[] {
   const actions: StudioMessageAction[] = []
   if (message.content) actions.push({ key: 'copy', label: '复制', icon: 'lucide:copy' })
@@ -312,11 +391,25 @@ function actionsForMessage(message: StudioMessageView): StudioMessageAction[] {
     if (message.content) actions.push({ key: 'edit', label: '编辑', icon: 'lucide:pencil' })
     actions.push({ key: 'resend', label: '重发', icon: 'lucide:refresh-cw' })
     if (message.content) actions.push({ key: 'fill', label: '填入', icon: 'lucide:clipboard-paste' })
-  } else if (message.mode !== 'image' || message.status === 'error') {
-    actions.push({ key: 'retry', label: '重试', icon: 'lucide:refresh-cw' })
+  } else if (
+    message.mode === 'image'
+    && isImageMessageWithoutResult(message)
+    && message.task?.actions.resume_poll
+  ) {
+    actions.push({ key: 'resume-poll', label: '继续任务', icon: 'lucide:refresh-cw' })
+  } else if (message.mode === 'file' ? fileTaskStatus(message) === 'error' : message.mode !== 'image' || isImageMessageWithoutResult(message)) {
+    actions.push({ key: 'retry', label: '重试并重新提交', icon: 'lucide:refresh-cw' })
   }
   actions.push({ key: 'delete', label: '删除', icon: 'lucide:trash-2', danger: true })
   return actions
+}
+
+function isImageTaskWithoutResult(task: ImageTask | undefined) {
+  return task?.status === 'failed' || task?.status === 'text_review'
+}
+
+function isImageMessageWithoutResult(message: StudioMessageView) {
+  return isImageTaskWithoutResult(message.task) || (!message.task && message.status === 'error')
 }
 
 function textValue(value: string | null | undefined) {
@@ -324,7 +417,7 @@ function textValue(value: string | null | undefined) {
 }
 
 function isStandaloneErrorMessage(message: StudioMessageView) {
-  if (message.role !== 'assistant' || message.mode === 'image' || message.status !== 'error') return false
+  if (message.role !== 'assistant' || message.mode === 'image' || message.mode === 'file' || message.status !== 'error') return false
   const content = textValue(message.content)
   const error = textValue(message.error)
   return !content || content === error
@@ -335,8 +428,51 @@ function standaloneErrorText(message: StudioMessageView) {
 }
 
 function isCodeMessage(message: StudioMessageView) {
-  if (message.mode === 'image') return false
+  if (message.mode === 'image' || message.mode === 'file') return false
   return hasStudioCodeContent(textValue(message.markdownContent || message.content))
+}
+
+function fileTaskStatus(message: StudioMessageView): EditableFileTask['status'] {
+  if (message.fileTask) return message.fileTask.status
+  if (message.status === 'error') return 'error'
+  if (message.status === 'done') return 'success'
+  return message.status === 'running' ? 'running' : 'queued'
+}
+
+function isFileTaskPending(message: StudioMessageView) {
+  const status = fileTaskStatus(message)
+  return status === 'queued' || status === 'running'
+}
+
+function fileKindLabel(message: StudioMessageView) {
+  return String(message.fileTask?.kind || message.fileKind || 'ppt').toUpperCase()
+}
+
+function fileTaskTitle(message: StudioMessageView) {
+  const kind = fileKindLabel(message)
+  if (message.fileTaskDeleted) return `${kind} 文件已删除`
+  const status = fileTaskStatus(message)
+  if (status === 'success') return `${kind} 文件已生成`
+  if (status === 'error') return `${kind} 生成失败`
+  return `${kind} 文件`
+}
+
+function fileTaskStatusText(message: StudioMessageView) {
+  return fileTaskStatus(message) === 'running' ? '正在生成可编辑文件' : '等待开始生成'
+}
+
+function fileTaskError(message: StudioMessageView) {
+  if (message.fileTask?.status === 'error') return message.fileTask.error
+  return textValue(message.error) || textValue(message.content) || '文件生成失败，请稍后重试。'
+}
+
+async function handleFileTaskDownload(
+  message: StudioMessageView,
+  url: string,
+  type: EditableFileTaskDownloadType,
+) {
+  if (!message.fileTask) return
+  await downloadFileTask(message.fileTask, url, type)
 }
 </script>
 
@@ -377,6 +513,17 @@ function isCodeMessage(message: StudioMessageView) {
   inline-size: min(100%, var(--studio-image-message-width, 18rem));
   min-width: 0;
   max-width: 100%;
+}
+
+.chat-message-container.is-file-message {
+  inline-size: min(100%, 24rem);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-message-container.is-file-message .chat-message-bubble-wrap,
+.chat-message-container.is-file-message .chat-message-bubble {
+  width: 100%;
 }
 
 .chat-message-container.is-single-image-result {
@@ -670,6 +817,99 @@ function isCodeMessage(message: StudioMessageView) {
   margin-top: 0.45rem;
   color: hsl(var(--muted-foreground));
   font-size: 0.75rem;
+}
+
+.studio-file-task {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.65rem;
+}
+
+.studio-file-task-icon {
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.45rem;
+  background: hsl(var(--muted) / 0.72);
+  color: hsl(var(--muted-foreground));
+}
+
+.studio-file-task.is-success .studio-file-task-icon {
+  background: hsl(var(--tone-success-bg, 142 76% 95%));
+  color: hsl(var(--tone-success-strong, 142 71% 35%));
+}
+
+.studio-file-task.is-error .studio-file-task-icon {
+  background: hsl(var(--tone-error-bg, 0 86% 97%));
+  color: hsl(var(--tone-error-strong, 0 72% 51%));
+}
+
+.studio-file-task-body {
+  display: grid;
+  min-width: 0;
+  gap: 0.18rem;
+}
+
+.studio-file-task-body strong {
+  color: hsl(var(--foreground));
+  font-size: 0.82rem;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.studio-file-task-body > span,
+.studio-file-task-body > p {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.studio-file-task.is-error .studio-file-task-body > p {
+  color: hsl(var(--tone-error-foreground, 0 72% 42%));
+}
+
+.studio-file-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.studio-file-task-action {
+  display: inline-flex;
+  min-height: 1.85rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.32rem;
+  border: 1px solid var(--ui-control-border, hsl(var(--border)));
+  border-radius: 0.4rem;
+  background: var(--ui-control-bg, hsl(var(--background)));
+  color: hsl(var(--foreground));
+  padding: 0.3rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: inherit;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.studio-file-task-action:disabled {
+  cursor: wait;
+  opacity: 0.56;
+}
+
+.studio-file-task-action:hover,
+.studio-file-task-action:focus-visible {
+  border-color: var(--ui-control-hover-border, hsl(var(--foreground) / 0.2));
+  background: var(--ui-control-hover-bg, hsl(var(--secondary)));
 }
 
 .studio-message-reference-strip {
@@ -1179,6 +1419,16 @@ function isCodeMessage(message: StudioMessageView) {
 
 .studio-result-placeholder svg {
   color: hsl(var(--muted-foreground));
+}
+
+.studio-result-placeholder-failed {
+  border-style: dashed;
+  background: hsl(var(--destructive) / 0.04);
+}
+
+.studio-result-placeholder-failed svg,
+.studio-result-placeholder-failed span {
+  color: hsl(var(--destructive) / 0.82);
 }
 
 .studio-result-placeholder span,

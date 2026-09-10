@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+	"github.com/auucoder/gptgrok2api-go/internal/auth"
 	"github.com/auucoder/gptgrok2api-go/internal/config"
 )
 
@@ -24,9 +25,7 @@ func adminTestConfig(root string) config.Config {
 		RootDir: root, DataDir: filepath.Join(root, "data"), StaticDir: filepath.Join(root, "web_dist"),
 		ConfigPath: filepath.Join(root, "config.json"), AccountsPath: filepath.Join(root, "data", "accounts.json"),
 		AuthKeysPath: filepath.Join(root, "data", "auth_keys.json"), APIKey: "api-secret", AdminKey: "admin-secret", Version: "test",
-		ImageDataDir: filepath.Join(root, "data", "files", "images"), VideoDataDir: filepath.Join(root, "data", "files", "videos"),
-		OAuthPath: filepath.Join(root, "data", "oauth.json.enc"), QueuePath: filepath.Join(root, "data", "tasks.json"),
-		RegisterPath: filepath.Join(root, "data", "register.json"), GrokAccountsPath: filepath.Join(root, "data", "grok_accounts.json"),
+		ImageDataDir: filepath.Join(root, "data", "files", "images"), QueuePath: filepath.Join(root, "data", "tasks.json"),
 	}
 }
 
@@ -40,7 +39,7 @@ func adminRequest(handler http.Handler, method, path string, body io.Reader) *ht
 
 func TestRuntimeMonitorLifecycle(t *testing.T) {
 	monitor := newRuntimeMonitor()
-	monitor.start("call-1", "/v1/videos", "video", "hello")
+	monitor.start("call-1", "/v1/images/generations", "gpt-image-2", "hello")
 	monitor.update("call-1", "in_progress", 50, "")
 	item, ok := monitor.detail("call-1")
 	if !ok || item.Progress != 50 || item.Status != "running" {
@@ -84,8 +83,10 @@ func TestRequestMonitorEnrichmentUpdatesLiveEgressAndAccount(t *testing.T) {
 }
 
 func TestRequestMonitorDoesNotCountHandlerExecutionAsQueueTime(t *testing.T) {
-	server := &Server{monitor: newRuntimeMonitor()}
+	// 中间件要先判鉴权再决定读不读 body，所以这里必须给出与生产一致的 auth。
+	server := &Server{monitor: newRuntimeMonitor(), auth: auth.New("api-secret", "admin-secret", "", false, nil)}
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-2","prompt":"test"}`))
+	request.Header.Set("X-API-Key", "api-secret")
 	response := httptest.NewRecorder()
 	server.withRequestMonitor(response, request, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(20 * time.Millisecond)
@@ -189,17 +190,15 @@ func TestDashboardAccountAndLogSummary(t *testing.T) {
 	accountStats := dashboardAccountStats([]map[string]any{
 		{"access_token": "header.payload.signature", "status": "正常", "enabled": true, "quota": 25, "type": "plus", "success": 3},
 		{"access_token": "second.jwt.token", "status": "限流", "enabled": true, "quota": 10, "type": "free", "fail": 1},
-		{"access_token": "grok-disabled", "status": "禁用", "enabled": false, "source_type": "grok"},
-		{"access_token": "grok-abnormal", "status": "异常", "enabled": true, "source_type": "grok", "invalid_count": 1},
 	})
-	if intValue(accountStats["total"]) != 4 || intValue(accountStats["active"]) != 1 || intValue(accountStats["limited"]) != 1 {
+	if intValue(accountStats["total"]) != 2 || intValue(accountStats["active"]) != 1 || intValue(accountStats["limited"]) != 1 {
 		t.Fatalf("unexpected account totals: %#v", accountStats)
 	}
-	if intValue(accountStats["abnormal"]) != 1 || intValue(accountStats["disabled"]) != 1 || intValue(accountStats["total_quota"]) != 25 {
+	if intValue(accountStats["abnormal"]) != 0 || intValue(accountStats["disabled"]) != 0 || intValue(accountStats["total_quota"]) != 25 {
 		t.Fatalf("unexpected account categories: %#v", accountStats)
 	}
 	providers := mapValue(accountStats["providers"])
-	if intValue(mapValue(providers["gpt"])["total"]) != 2 || intValue(mapValue(providers["grok"])["total"]) != 2 {
+	if intValue(mapValue(providers["gpt"])["total"]) != 2 || len(providers) != 1 {
 		t.Fatalf("unexpected provider totals: %#v", providers)
 	}
 
@@ -259,7 +258,7 @@ func TestDashboardRouteDisablesCaching(t *testing.T) {
 func TestRequestMonitorWritesMultipartCallLog(t *testing.T) {
 	root := t.TempDir()
 	cfg := adminTestConfig(root)
-	server := &Server{cfg: cfg, monitor: newRuntimeMonitor()}
+	server := &Server{cfg: cfg, monitor: newRuntimeMonitor(), auth: auth.New("api-secret", "admin-secret", "", false, nil)}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -275,6 +274,7 @@ func TestRequestMonitorWritesMultipartCallLog(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-API-Key", "api-secret")
 	response := httptest.NewRecorder()
 	server.withRequestMonitor(response, request, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -415,16 +415,9 @@ func TestAdminImagesTagsAndBackup(t *testing.T) {
 	}
 }
 
-func TestRegistrationManagementEndpoints(t *testing.T) {
+func TestRemovedRegistrationEndpoints(t *testing.T) {
 	root := t.TempDir()
 	cfg := adminTestConfig(root)
-	if err := os.MkdirAll(filepath.Dir(cfg.GrokAccountsPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	account := `[{"id":"grok-one","email":"alice@example.com","password":"secret","sso":"sso-token","status":"active","source_type":"protocol"}]`
-	if err := os.WriteFile(cfg.GrokAccountsPath, []byte(account), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	handler := New(cfg).Handler()
 
 	unauthorized := httptest.NewRecorder()
@@ -433,41 +426,20 @@ func TestRegistrationManagementEndpoints(t *testing.T) {
 		t.Fatalf("register endpoint should require admin key: %d", unauthorized.Code)
 	}
 
-	configResponse := adminRequest(handler, http.MethodGet, "/api/register", nil)
-	if configResponse.Code != http.StatusOK || !strings.Contains(configResponse.Body.String(), `"register"`) {
-		t.Fatalf("unexpected register config: %d %s", configResponse.Code, configResponse.Body.String())
-	}
-	startResponse := adminRequest(handler, http.MethodPost, "/api/register/start", nil)
-	if startResponse.Code != http.StatusServiceUnavailable || !strings.Contains(startResponse.Body.String(), `"ready":false`) {
-		t.Fatalf("register start should report unavailable executor: %d %s", startResponse.Code, startResponse.Body.String())
-	}
-	runtimeResponse := adminRequest(handler, http.MethodGet, "/api/register/runtime", nil)
-	if runtimeResponse.Code != http.StatusOK || !strings.Contains(runtimeResponse.Body.String(), `"ready":false`) {
-		t.Fatalf("unexpected registration runtime status: %d %s", runtimeResponse.Code, runtimeResponse.Body.String())
-	}
-	listResponse := adminRequest(handler, http.MethodGet, "/api/register/grok/accounts?page_size=10", nil)
-	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), "al***e@example.com") {
-		t.Fatalf("register list failed: %d %s", listResponse.Code, listResponse.Body.String())
-	}
-	if strings.Contains(listResponse.Body.String(), "sso-token") || strings.Contains(listResponse.Body.String(), `"password":"secret"`) {
-		t.Fatalf("register list leaked credentials: %s", listResponse.Body.String())
-	}
-
-	authorizeResponse := adminRequest(handler, http.MethodPost, "/api/register/grok/accounts/oauth/authorize", strings.NewReader(`{"ids":["grok-one"]}`))
-	if authorizeResponse.Code != http.StatusOK || !strings.Contains(authorizeResponse.Body.String(), `"status":"queued"`) {
-		t.Fatalf("OAuth authorization was not queued: %d %s", authorizeResponse.Code, authorizeResponse.Body.String())
-	}
-	credentialsResponse := adminRequest(handler, http.MethodGet, "/api/register/grok/accounts/grok-one/credentials", nil)
-	if credentialsResponse.Code != http.StatusOK || !strings.Contains(credentialsResponse.Body.String(), "secret") {
-		t.Fatalf("credentials endpoint failed: %d %s", credentialsResponse.Code, credentialsResponse.Body.String())
-	}
-	ssoResponse := adminRequest(handler, http.MethodGet, "/api/register/grok/accounts/export-sso", nil)
-	if ssoResponse.Code != http.StatusOK || !strings.Contains(ssoResponse.Body.String(), "sso-token") {
-		t.Fatalf("SSO export failed: %d %s", ssoResponse.Code, ssoResponse.Body.String())
-	}
-	disableResponse := adminRequest(handler, http.MethodPost, "/api/register/grok/accounts/runtime/disabled", strings.NewReader(`{"ids":["grok-one"],"disabled":true}`))
-	if disableResponse.Code != http.StatusOK || !strings.Contains(disableResponse.Body.String(), `"ok":1`) {
-		t.Fatalf("disable endpoint failed: %d %s", disableResponse.Code, disableResponse.Body.String())
+	for _, endpoint := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/register"},
+		{http.MethodPost, "/api/register/start"},
+		{http.MethodGet, "/api/register/runtime"},
+		{http.MethodGet, "/api/register/grok/accounts"},
+		{http.MethodPost, "/api/register/grok/accounts/oauth/authorize"},
+	} {
+		response := adminRequest(handler, endpoint.method, endpoint.path, nil)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("removed registration endpoint should return 404: %s %s => %d %s", endpoint.method, endpoint.path, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -501,5 +473,305 @@ func TestImportedAbnormalAccountCleanup(t *testing.T) {
 	}
 	if len(items) != 1 || stringValue(items[0]["access_token"]) != "normal-token" {
 		t.Fatalf("unexpected accounts after cleanup: %#v", items)
+	}
+}
+
+func TestDashboardSchemaV5Contract(t *testing.T) {
+	root := t.TempDir()
+	cfg := adminTestConfig(root)
+	server := New(cfg)
+	handler := server.Handler()
+
+	res := adminRequest(handler, http.MethodGet, "/api/dashboard", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("dashboard failed: %d %s", res.Code, res.Body.String())
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &data); err != nil {
+		t.Fatalf("unmarshal dashboard: %v", err)
+	}
+
+	if v, _ := data["schema_version"].(float64); int(v) != 5 {
+		t.Fatalf("expected top-level schema_version 5, got %v", data["schema_version"])
+	}
+
+	meta, _ := data["meta"].(map[string]any)
+	if meta == nil {
+		t.Fatal("missing meta in dashboard response")
+	}
+	if v, _ := meta["schema_version"].(float64); int(v) != 5 {
+		t.Fatalf("expected meta.schema_version 5, got %v", meta["schema_version"])
+	}
+
+	ranges, _ := data["ranges"].(map[string]any)
+	if ranges == nil {
+		t.Fatal("missing ranges in dashboard response")
+	}
+
+	for _, key := range []string{"24h", "7d", "30d"} {
+		r, ok := ranges[key].(map[string]any)
+		if !ok {
+			t.Fatalf("missing range %s", key)
+		}
+		expectedBuckets := 24
+		if key == "7d" {
+			expectedBuckets = 7
+		} else if key == "30d" {
+			expectedBuckets = 30
+		}
+		window, _ := r["window"].(map[string]any)
+		if window == nil {
+			t.Fatalf("range %s: missing window", key)
+		}
+		if count, _ := window["bucket_count"].(float64); int(count) != expectedBuckets {
+			t.Fatalf("range %s: expected window.bucket_count %d, got %v", key, expectedBuckets, window["bucket_count"])
+		}
+		trend, _ := r["trend"].(map[string]any)
+		if trend == nil {
+			t.Fatalf("range %s: missing trend", key)
+		}
+		labels, _ := trend["labels"].([]any)
+		buckets, _ := r["buckets"].([]any)
+		if len(labels) != expectedBuckets || len(buckets) != expectedBuckets {
+			t.Fatalf("range %s: expected %d labels and buckets, got %d labels and %d buckets",
+				key, expectedBuckets, len(labels), len(buckets))
+		}
+	}
+
+	runtimeVal, _ := data["runtime"].(map[string]any)
+	if runtimeVal == nil {
+		t.Fatal("missing runtime in dashboard response")
+	}
+	mode := stringValue(runtimeVal["runtime_mode"])
+	if mode != "docker" && mode != "native" {
+		t.Fatalf("unexpected runtime_mode: %v", mode)
+	}
+	cpuCap, _ := runtimeVal["cpu_capacity"].(float64)
+	if cpuCap <= 0 {
+		t.Fatalf("unexpected cpu_capacity: %v", cpuCap)
+	}
+	uptime, _ := runtimeVal["service_uptime_seconds"].(float64)
+	if uptime < 0 {
+		t.Fatalf("unexpected service_uptime_seconds: %v", uptime)
+	}
+	scope := stringValue(runtimeVal["memory_scope"])
+	if scope != "container" && scope != "system" && scope != "visible" {
+		t.Fatalf("unexpected memory_scope: %v", scope)
+	}
+
+	storageVal, _ := data["storage"].(map[string]any)
+	if storageVal == nil {
+		t.Fatal("missing storage in dashboard response")
+	}
+	imageStorage, _ := storageVal["image_storage"].(map[string]any)
+	if imageStorage == nil || imageStorage["status"] != "not_checked" {
+		t.Fatalf("expected image_storage.status 'not_checked', got %#v", imageStorage)
+	}
+}
+
+func TestLogDetailAPIAndPresentation(t *testing.T) {
+	root := t.TempDir()
+	cfg := adminTestConfig(root)
+	if err := os.MkdirAll(cfg.ImageDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a test image file
+	testImgPath := filepath.Join(cfg.ImageDataDir, "img123.png")
+	// Minimal 1x1 PNG bytes
+	pngHeader := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+	}
+	if err := os.WriteFile(testImgPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logLine := map[string]any{
+		"id":      "call-test-123",
+		"time":    time.Now().UTC().Format(time.RFC3339),
+		"type":    "call",
+		"summary": "画一只猫",
+		"detail": map[string]any{
+			"call_id":  "call-test-123",
+			"endpoint": "/v1/images/generations",
+			"model":    "gpt-image-2",
+			"status":   "success",
+			"request_meta": map[string]any{
+				"size":            "1024x1024",
+				"quality":         "standard",
+				"response_format": "url",
+			},
+			"result_images": []any{
+				map[string]any{"width": 1024, "height": 1024},
+			},
+		},
+	}
+	lineBytes, _ := json.Marshal(logLine)
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "logs.jsonl"), append(lineBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := New(cfg)
+	handler := server.Handler()
+
+	// 1. Test single log detail endpoint /api/logs/{log_id}
+	res := adminRequest(handler, http.MethodGet, "/api/logs/call-test-123", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("get log detail failed: %d %s", res.Code, res.Body.String())
+	}
+	var detailResp map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &detailResp); err != nil {
+		t.Fatalf("unmarshal log detail: %v", err)
+	}
+	if stringValue(detailResp["id"]) != "call-test-123" {
+		t.Fatalf("unexpected id in log detail: %v", detailResp["id"])
+	}
+	presentation, _ := detailResp["presentation"].(map[string]any)
+	if presentation == nil {
+		t.Fatal("missing presentation in log detail")
+	}
+	resObj, _ := presentation["result"].(map[string]any)
+	if resObj == nil || stringValue(resObj["resolution"]) != "1024×1024" {
+		t.Fatalf("unexpected resolution in presentation: %#v", resObj)
+	}
+
+	// 2. Test log list aggregation /api/logs
+	listRes := adminRequest(handler, http.MethodGet, "/api/logs", nil)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("get logs list failed: %d %s", listRes.Code, listRes.Body.String())
+	}
+	var listResp map[string]any
+	if err := json.Unmarshal(listRes.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal logs list: %v", err)
+	}
+	if _, ok := listResp["facets"].(map[string]any); !ok {
+		t.Fatal("missing facets in logs list response")
+	}
+	if _, ok := listResp["stats"].(map[string]any); !ok {
+		t.Fatal("missing stats in logs list response")
+	}
+	if _, ok := listResp["has_more"].(bool); !ok {
+		t.Fatal("missing has_more in logs list response")
+	}
+
+	// 3. Test update status endpoint
+	updateRes := adminRequest(handler, http.MethodGet, "/api/system/update-status", nil)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("get update status failed: %d %s", updateRes.Code, updateRes.Body.String())
+	}
+	var updateResp map[string]any
+	if err := json.Unmarshal(updateRes.Body.Bytes(), &updateResp); err != nil {
+		t.Fatalf("unmarshal update status: %v", err)
+	}
+	if updateResp["current_tag"] == nil {
+		t.Fatal("missing current_tag in update status")
+	}
+}
+
+func TestSearchAPIEndpoint(t *testing.T) {
+	root := t.TempDir()
+	cfg := adminTestConfig(root)
+	server := New(cfg)
+	handler := server.Handler()
+
+	// 1. Missing auth
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"prompt":"hello"}`))
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthorized search, got %d", rec1.Code)
+	}
+
+	// 2. Empty prompt
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"prompt":""}`))
+	req2.Header.Set("Authorization", "Bearer api-secret")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty prompt, got %d %s", rec2.Code, rec2.Body.String())
+	}
+
+	// 3. Valid search with no accounts
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"prompt":"test search query"}`))
+	req3.Header.Set("Authorization", "Bearer api-secret")
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when no account available, got %d %s", rec3.Code, rec3.Body.String())
+	}
+}
+
+func TestDynamicPollTimeoutSettings(t *testing.T) {
+	root := t.TempDir()
+	cfg := adminTestConfig(root)
+	server := New(cfg)
+	handler := server.Handler()
+
+	body := `{"image_poll_timeout_secs": 45, "image_poll_interval_secs": 3, "image_poll_initial_wait_secs": 2, "console_request_timeout_secs": 300}`
+	res := adminRequest(handler, http.MethodPost, "/api/settings", strings.NewReader(body))
+	if res.Code != http.StatusOK {
+		t.Fatalf("update settings failed: %d %s", res.Code, res.Body.String())
+	}
+
+	if server.cfg.ImagePollTimeout != 45*time.Second {
+		t.Fatalf("expected cfg.ImagePollTimeout 45s, got %v", server.cfg.ImagePollTimeout)
+	}
+	if server.cfg.ImagePollInterval != 3*time.Second {
+		t.Fatalf("expected cfg.ImagePollInterval 3s, got %v", server.cfg.ImagePollInterval)
+	}
+	if server.cfg.ImagePollInitialWait != 2*time.Second {
+		t.Fatalf("expected cfg.ImagePollInitialWait 2s, got %v", server.cfg.ImagePollInitialWait)
+	}
+	if server.cfg.ConsoleRequestTimeout != 300*time.Second {
+		t.Fatalf("expected cfg.ConsoleRequestTimeout 300s, got %v", server.cfg.ConsoleRequestTimeout)
+	}
+
+	if server.openAIImage.PollTimeout != 45*time.Second {
+		t.Fatalf("expected openAIImage.PollTimeout 45s, got %v", server.openAIImage.PollTimeout)
+	}
+	if server.openAIImage.PollInterval != 3*time.Second {
+		t.Fatalf("expected openAIImage.PollInterval 3s, got %v", server.openAIImage.PollInterval)
+	}
+	if server.openAIImage.InitialWait != 2*time.Second {
+		t.Fatalf("expected openAIImage.InitialWait 2s, got %v", server.openAIImage.InitialWait)
+	}
+}
+
+func TestImageDimensionsExtraction(t *testing.T) {
+	root := t.TempDir()
+	cfg := adminTestConfig(root)
+	if err := os.MkdirAll(cfg.ImageDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg)
+
+	// Test missing file
+	w, h := server.lookupImageDimensions("non_existent")
+	if w != 0 || h != 0 {
+		t.Fatalf("expected 0,0 for missing image, got %d,%d", w, h)
+	}
+
+	// Test valid 1x1 PNG
+	pngHeader := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+	}
+	testImgPath := filepath.Join(cfg.ImageDataDir, "sample_1x1.png")
+	if err := os.WriteFile(testImgPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w, h = server.lookupImageDimensions("sample_1x1")
+	if w != 1 || h != 1 {
+		t.Fatalf("expected 1,1 for sample_1x1, got %d,%d", w, h)
 	}
 }

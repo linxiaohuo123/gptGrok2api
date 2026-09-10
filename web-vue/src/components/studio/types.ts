@@ -1,4 +1,5 @@
-export type StudioComposeMode = 'chat' | 'image' | 'search'
+export type StudioComposeMode = 'chat' | 'image' | 'search' | 'file'
+export type StudioFileKind = 'ppt' | 'psd'
 export type StudioRole = 'user' | 'assistant'
 export type StudioMessageStatus = 'sending' | 'streaming' | 'queued' | 'running' | 'done' | 'error'
 export type StudioConversationBadgeState = 'running' | 'done' | 'error'
@@ -20,6 +21,9 @@ export interface StudioMessage {
   imageSize?: string
   imageCount?: number
   taskId?: string
+  fileTaskId?: string
+  fileTaskDeleted?: boolean
+  fileKind?: StudioFileKind
   error?: string
   attachments?: string[]
   referenceImages?: StudioReferenceImage[]
@@ -56,9 +60,7 @@ export interface StudioReferenceImage {
   dataUrl: string
 }
 
-export interface StudioReference extends StudioReferenceImage {
-  previewDataUrl?: string
-}
+export type StudioReference = StudioReferenceImage
 
 export interface StudioImageAssetView {
   url: string

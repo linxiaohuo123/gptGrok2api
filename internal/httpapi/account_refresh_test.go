@@ -309,3 +309,23 @@ func runAccountRefreshForTest(t *testing.T, handler http.Handler, refs []string)
 	t.Fatalf("refresh did not finish: %#v", progress)
 	return nil
 }
+
+func TestPruneRefreshProgressBounded(t *testing.T) {
+	s := &Server{
+		refreshProgress: map[string]*accountRefreshProgress{},
+	}
+	// Insert 5 entries, some done, some active
+	t0 := time.Now().Add(-5 * time.Minute)
+	s.refreshProgress["done-old"] = &accountRefreshProgress{Done: true, createdAt: t0}
+	s.refreshProgress["done-new"] = &accountRefreshProgress{Done: true, createdAt: t0.Add(time.Minute)}
+	s.refreshProgress["running-old"] = &accountRefreshProgress{Done: false, createdAt: t0.Add(2 * time.Minute)}
+
+	// With max capacity 2, pruneRefreshProgressLocked should delete "done-old" first
+	s.pruneRefreshProgressLocked(2)
+	if _, exists := s.refreshProgress["done-old"]; exists {
+		t.Fatalf("expected done-old to be pruned first, still present")
+	}
+	if len(s.refreshProgress) != 2 {
+		t.Fatalf("expected length 2, got %d", len(s.refreshProgress))
+	}
+}

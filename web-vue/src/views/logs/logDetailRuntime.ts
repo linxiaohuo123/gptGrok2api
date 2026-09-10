@@ -1,14 +1,12 @@
 import { computed, ref, watch } from 'vue'
 import type { GalleryFile } from '@/api/gallery'
 import type { SystemLogRow } from '@/api/logs'
+import { errorMessage } from '@/lib/errorMessage'
 import {
   buildDiagnosticDetailFields,
   buildPrimaryDetailFields,
-  buildTimelineGroups,
-  buildTimelineLegendItems,
-  buildTimelineSegments,
+  buildTimelineView,
   shouldAutoExpandTimeline,
-  type DetailTimelineStep,
 } from '@/views/logs/logDetailView'
 import {
   buildLogPreviewGalleryFile,
@@ -18,29 +16,32 @@ import {
 
 export type DetailPreviewImage = LogPreviewImage
 
-export function useLogDetailRuntime() {
+type LogDetailRuntimeOptions = {
+  loadDetail: (id: string) => Promise<SystemLogRow>
+}
+
+export function useLogDetailRuntime(options: LogDetailRuntimeOptions) {
   const selectedLog = ref<SystemLogRow | null>(null)
   const selectedDetailPreview = ref<DetailPreviewImage | null>(null)
+  const detailTargetId = ref('')
+  const detailLoading = ref(false)
+  const detailError = ref('')
   const timelineDetailsExpanded = ref(false)
   const brokenPreviewUrls = ref<Set<string>>(new Set())
+  let detailRequestSequence = 0
 
-  const selectedTimelineSegments = computed(() => buildTimelineSegments(selectedLog.value))
-  const selectedTimelineLegendItems = computed(() => buildTimelineLegendItems(selectedTimelineSegments.value))
-  const selectedTimelineGroups = computed(() => buildTimelineGroups(selectedLog.value))
+  const detailOpen = computed(() => Boolean(detailTargetId.value || selectedLog.value))
 
-  const selectedBottleneckStep = computed<DetailTimelineStep | null>(() => {
-    const steps = selectedTimelineGroups.value.flatMap((group) => group.steps)
-    return steps.reduce<DetailTimelineStep | null>((current, step) => {
-      if (!current || step.valueMs > current.valueMs) return step
-      return current
-    }, null)
-  })
-
-  const selectedTimelineStepCount = computed(() => selectedTimelineGroups.value.reduce((total, group) => total + group.steps.length, 0))
-  const selectedTimelineSegmentTotal = computed(() => selectedTimelineSegments.value.reduce((total, segment) => total + segment.valueMs, 0))
-  const timelineDetailsAutoExpanded = computed(() => shouldAutoExpandTimeline(selectedLog.value, selectedBottleneckStep.value))
+  const selectedTimeline = computed(() => buildTimelineView(
+    selectedLog.value?.detailPresentation.timeline,
+  ))
+  const selectedTimelineSegments = computed(() => selectedTimeline.value.segments)
+  const selectedTimelineLegendItems = computed(() => selectedTimeline.value.legendItems)
+  const selectedTimelineGroups = computed(() => selectedTimeline.value.groups)
+  const selectedTimelineStepCount = computed(() => selectedTimeline.value.stepCount)
+  const selectedTimelineSegmentTotal = computed(() => selectedTimeline.value.segmentTotalMs)
+  const timelineDetailsAutoExpanded = computed(() => shouldAutoExpandTimeline(selectedLog.value))
   const timelineDetailsVisible = computed(() => timelineDetailsExpanded.value)
-  const selectedHasTimeline = computed(() => selectedTimelineSegments.value.length > 0 || selectedTimelineGroups.value.length > 0)
 
   const selectedPrimaryDetailFields = computed(() => buildPrimaryDetailFields(selectedLog.value))
   const selectedDiagnosticDetailFields = computed(() => buildDiagnosticDetailFields(selectedLog.value))
@@ -58,11 +59,43 @@ export function useLogDetailRuntime() {
     brokenPreviewUrls.value = new Set([...brokenPreviewUrls.value, url])
   }
 
+  async function loadDetail(id: string) {
+    const targetId = id.trim()
+    if (!targetId) return
+    const requestSequence = ++detailRequestSequence
+    detailTargetId.value = targetId
+    selectedDetailPreview.value = null
+    detailError.value = ''
+    detailLoading.value = true
+    selectedLog.value = null
+
+    try {
+      const item = await options.loadDetail(targetId)
+      if (requestSequence !== detailRequestSequence || detailTargetId.value !== targetId) return
+      selectedLog.value = item
+    } catch (caught) {
+      if (requestSequence !== detailRequestSequence || detailTargetId.value !== targetId) return
+      detailError.value = errorMessage(caught, '日志详情加载失败')
+    } finally {
+      if (requestSequence === detailRequestSequence && detailTargetId.value === targetId) {
+        detailLoading.value = false
+      }
+    }
+  }
+
   function openDetail(item: SystemLogRow) {
-    selectedLog.value = item
+    void loadDetail(item.id)
+  }
+
+  function openDetailById(id: string) {
+    void loadDetail(id)
   }
 
   function closeDetail() {
+    detailRequestSequence += 1
+    detailTargetId.value = ''
+    detailLoading.value = false
+    detailError.value = ''
     selectedLog.value = null
     selectedDetailPreview.value = null
   }
@@ -80,7 +113,10 @@ export function useLogDetailRuntime() {
   }
 
   watch(
-    () => selectedLog.value?.id || '',
+    [
+      () => selectedLog.value?.id || '',
+      () => timelineDetailsAutoExpanded.value,
+    ],
     () => {
       timelineDetailsExpanded.value = timelineDetailsAutoExpanded.value
     },
@@ -88,6 +124,10 @@ export function useLogDetailRuntime() {
 
   return {
     selectedLog,
+    detailOpen,
+    detailLoading,
+    detailError,
+    detailTargetId,
     selectedDetailPreview,
     selectedDetailPreviewFile,
     selectedDetailImages,
@@ -96,14 +136,13 @@ export function useLogDetailRuntime() {
     selectedTimelineSegments,
     selectedTimelineLegendItems,
     selectedTimelineGroups,
-    selectedBottleneckStep,
     selectedTimelineStepCount,
     selectedTimelineSegmentTotal,
-    selectedHasTimeline,
     timelineDetailsVisible,
     isPreviewBroken,
     markPreviewBroken,
     openDetail,
+    openDetailById,
     closeDetail,
     openDetailImagePreview,
     closeDetailImagePreview,

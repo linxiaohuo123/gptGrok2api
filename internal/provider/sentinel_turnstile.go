@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（crypto、encoding）
+// [OUTPUT]: Sentinel/Turnstile 挑战求解：solveSentinelTurnstileToken、sentinelVM
+// [POS]: 内置 VM 执行上游挑战脚本，产出可用的 sentinel token。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package provider
 
 import (

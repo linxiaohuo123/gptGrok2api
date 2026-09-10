@@ -1,6 +1,6 @@
 <template>
   <tr
-    class="border-t border-border transition-colors hover:bg-muted/20"
+    class="border-t border-border"
     :class="group.enabled ? '' : 'bg-muted/30'"
     v-memo="[signature]"
   >
@@ -41,7 +41,7 @@
           :key="`${group.id}-${node.id}-health`"
           class="truncate text-xs"
           :class="nodeTestClass(group, node)"
-          :title="node.last_error || node.last_checked_at || ''"
+          :title="node.health.error || node.health.checked_at || ''"
         >
           {{ node.name || node.id }} · {{ nodeTestSummary(group, node) }}
         </p>

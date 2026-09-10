@@ -1,3 +1,11 @@
+// [INPUT]: accounts/protocol/proxy
+// [OUTPUT]: 图片全流程：Generate、Resolve、downloadFile、doRequest、readImageDownloadResponse
+// [POS]: 出网统一入口 doRequest；兼容 gpt-image-2 与 gpt-image-2.5 家族模型自动路由。
+//         创建流的每一帧 SSE 都要先过 upstreamErrorFromFrame：图片链路与对话链路
+//         必须共用同一套错误语义还原，否则上游以 SSE 帧返回的审核拦截会被降级成
+//         "没有 conversation id"，最终以 502 触发跨账号轮换并冷却健康账号。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package provider
 
 import (
@@ -12,6 +20,7 @@ import (
 	"fmt"
 	"html"
 	"image"
+	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -32,14 +41,15 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// OpenAIImage implements the authenticated ChatGPT Web image flow. It is kept
-// separate from Media because ChatGPT JWTs and Grok SSO cookies are different
-// credential families and must never share request headers or account pools.
+// OpenAIImage implements the authenticated ChatGPT Web image flow.
 type OpenAIImage struct {
 	BaseURL        string
 	Client         *http.Client
 	Proxy          *proxyruntime.Manager
 	RequestTimeout time.Duration
+	PollTimeout    time.Duration
+	PollInterval   time.Duration
+	InitialWait    time.Duration
 	browserMu      sync.Mutex
 	browsers       map[string]*browserHTTP
 }
@@ -48,6 +58,41 @@ type OpenAIImageInput struct {
 	Name string
 	MIME string
 	Data []byte
+}
+
+type ImageResult struct {
+	Base64 string
+	MIME   string
+	Width  int
+	Height int
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func boolValue(value any) bool {
+	result, _ := value.(bool)
+	return result
+}
+
+func numberValue(value any) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case float32:
+		return float64(number), true
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 var openAIImageFileIDPattern = regexp.MustCompile(`(?i)^file_[a-z0-9][a-z0-9_-]{5,}$`)
@@ -255,9 +300,12 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 		}
 		notifyOpenAIImageStage(ctx, "download_ms", downloadStarted)
 		proxyruntime.ObserveImageLeaseStage(ctx, time.Since(downloadStarted), openAIImageSlowDownload)
+		w, h := detectImageDimensions(raw)
 		results = append(results, ImageResult{
 			Base64: base64.StdEncoding.EncodeToString(raw),
 			MIME:   mime,
+			Width:  w,
+			Height: h,
 		})
 	}
 	if len(results) > 0 {
@@ -561,10 +609,18 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 	defer response.Body.Close()
 	conversationID := ""
 	fileIDs := []string{}
+	var frameErr error
 	err = scanOpenAISSE(response.Body, func(raw []byte) bool {
 		var value any
 		if json.Unmarshal(raw, &value) != nil {
 			return false
+		}
+		// 上游以 SSE 帧返回的错误必须还原成 UpstreamError。
+		// 此前这里只收集图片引用、从不看 detail/error，于是审核拦截与凭据失效
+		// 被降级成"没有 conversation id"这句普通错误，upstreamStatus 兜底为 502，
+		// 触发跨账号轮换并冷却健康账号——正是铁律四禁止的雪崩路径。
+		if frameErr = upstreamErrorFromFrame(value); frameErr != nil {
+			return true
 		}
 		collectOpenAIImageRefs(value, &conversationID, &fileIDs)
 		return false
@@ -572,11 +628,17 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 	if err != nil {
 		return "", nil, err
 	}
+	if frameErr != nil {
+		return "", nil, frameErr
+	}
 	return conversationID, uniqueStrings(fileIDs), nil
 }
 
 func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Account, conversationID string) ([]string, error) {
-	timeout := o.RequestTimeout
+	timeout := o.PollTimeout
+	if timeout <= 0 {
+		timeout = o.RequestTimeout
+	}
 	if timeout <= 0 {
 		timeout = openAIImageDefaultPollTimeout
 	}
@@ -586,7 +648,18 @@ func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Acc
 		}
 	}
 	deadline := time.Now().Add(timeout)
+	if o.InitialWait > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(o.InitialWait):
+		}
+	}
 	var lastErr error
+	interval := o.PollInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
 	for time.Now().Before(deadline) {
 		value, err := o.pollConversationOnce(ctx, account, conversationID)
 		if err == nil {
@@ -605,7 +678,7 @@ func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Acc
 		} else {
 			lastErr = err
 		}
-		wait := 5 * time.Second
+		wait := interval
 		if remaining := time.Until(deadline); remaining < wait {
 			wait = remaining
 		}
@@ -955,9 +1028,19 @@ func (o *OpenAIImage) downloadImageRef(ctx context.Context, account accounts.Acc
 	return o.downloadFile(ctx, account, strings.TrimPrefix(imageRef, "file-service://"))
 }
 
+// 图片下载的单次读取上限；首读与二读共用，避免首读把大图悄悄截断成半张。
+const maxOpenAIImageBytes = 64 << 20
+
 func (o *OpenAIImage) readImageDownloadResponse(ctx context.Context, account accounts.Account, response *http.Response) ([]byte, string, error) {
+	// 这里同时承接元数据 JSON 和图片原始字节，必须自己校验状态码：
+	// 否则 403 的 HTML 会以 "text/html" 被当成图片写进图库。
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		upstreamErr := readOpenAIHTTPError(response, "image download")
+		_ = response.Body.Close()
+		return nil, "", upstreamErr
+	}
 	var value map[string]any
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxOpenAIImageBytes))
 	_ = response.Body.Close()
 	if err != nil {
 		return nil, "", err
@@ -974,7 +1057,7 @@ func (o *OpenAIImage) readImageDownloadResponse(ctx context.Context, account acc
 		if err != nil {
 			return nil, "", err
 		}
-		raw, err = io.ReadAll(io.LimitReader(response.Body, 64<<20))
+		raw, err = io.ReadAll(io.LimitReader(response.Body, maxOpenAIImageBytes))
 		_ = response.Body.Close()
 		if err != nil {
 			return nil, "", err
@@ -1055,15 +1138,18 @@ func (o *OpenAIImage) doRequest(ctx context.Context, method, endpoint, targetPat
 	if stream {
 		request.Header.Set("Accept", "text/event-stream")
 	}
-	client := o.Client
+	// 两条传输路径合并成一次非 2xx 校验：浏览器分支此前直接 return，
+	// 于是 Cloudflare 403 的 HTML 会被上层当正常响应用下去。
+	var response *http.Response
 	if browserEligible(o.BaseURL) && authenticated {
 		browser, browserErr := o.browserFor(proxyURL)
 		if browserErr != nil {
 			return nil, browserErr
 		}
-		return browser.Do(request)
+		response, err = browser.Do(request)
+	} else {
+		response, err = o.Client.Do(request)
 	}
-	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -1373,10 +1459,20 @@ func isOpenAIImageFileID(value string) bool {
 }
 
 func openAIImageModel(model string) string {
-	if strings.EqualFold(strings.TrimSpace(model), "gpt-image-2") {
+	trimmed := strings.ToLower(strings.TrimSpace(model))
+	if trimmed == "gpt-image-2" {
 		return "gpt-5-3"
 	}
-	return strings.TrimSpace(model)
+	if strings.Contains(trimmed, "codex-gpt-image-2") {
+		return "codex-gpt-image-2"
+	}
+	if strings.HasPrefix(trimmed, "gpt-image-2.5") {
+		return "auto"
+	}
+	if trimmed == "" {
+		return "auto"
+	}
+	return trimmed
 }
 
 func buildLegacyRequirementsToken(userAgent string, scripts []string, build string) string {
@@ -1434,6 +1530,14 @@ func imageDimensions(raw []byte) (int, int) {
 	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return 1024, 1024
+	}
+	return config.Width, config.Height
+}
+
+func detectImageDimensions(raw []byte) (int, int) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return 0, 0
 	}
 	return config.Width, config.Height
 }

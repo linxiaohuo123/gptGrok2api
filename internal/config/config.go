@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（os、encoding/json、time）
+// [OUTPUT]: 配置装载：Load、Config
+// [POS]: 环境变量优先、config.json 兜底；所有数值型配置在此钳制上下界。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package config
 
 import (
@@ -29,16 +34,6 @@ type Config struct {
 	OpenAIPlatformBaseURL  string
 	OpenAILoginTokenURL    string
 	OpenAIAgentRegisterURL string
-	GrokChatURL            string
-	GrokRateLimitsURL      string
-	XAICLIBaseURL          string
-	XAICLITokenURL         string
-	ConsoleURL             string
-	MediaChatURL           string
-	MediaPostURL           string
-	AssetUploadURL         string
-	AssetsBaseURL          string
-	ImagineWSURL           string
 	ProxyURL               string
 	ProxyPool              []string
 	FallbackProxy          string
@@ -53,27 +48,23 @@ type Config struct {
 	RedisAddr              string
 	RedisPassword          string
 	RedisDB                int
-	OAuthDeviceURL         string
-	OAuthTokenURL          string
 	ImageDataDir           string
-	VideoDataDir           string
-	OAuthPath              string
 	QueuePath              string
-	RegisterPath           string
-	GrokAccountsPath       string
-	RegisterMailURL        string
-	RegisterCaptchaURL     string
-	RegisterDriverURL      string
-	RegisterDriverKey      string
 	Version                string
 	AllowAnonymous         bool
 	RequestTimeout         time.Duration
+	ConsoleRequestTimeout  time.Duration
+	ImagePollTimeout       time.Duration
+	ImagePollInterval      time.Duration
+	ImagePollInitialWait   time.Duration
 	ChatMaxRetries         int
 	ChatRetryCodes         map[int]bool
 	ImageAccountLimit      int
 	ImageMaxConcurrency    int
 	ImageRetentionDays     int
 	ImageCleanupInterval   time.Duration
+	ChatDedupeEnabled      bool
+	ChatDedupeTTL          time.Duration
 }
 
 type ProxyGroup struct {
@@ -98,6 +89,9 @@ type ProxyNode struct {
 }
 
 func Load(root string) (Config, error) {
+	if strings.TrimSpace(root) == "" {
+		root = strings.TrimSpace(os.Getenv("GO_ROOT_DIR"))
+	}
 	if strings.TrimSpace(root) == "" {
 		root = strings.TrimSpace(os.Getenv("GROK_ROOT_DIR"))
 	}
@@ -149,10 +143,23 @@ func Load(root string) (Config, error) {
 		imageCleanupIntervalSeconds = 60
 	}
 
+	listenAddr := env("GO_LISTEN_ADDR", env("CHATGPT2API_LISTEN_ADDR", ""))
+	if listenAddr == "" {
+		if port := env("CHATGPT2API_PORT", env("PORT", "")); port != "" {
+			if !strings.HasPrefix(port, ":") {
+				listenAddr = ":" + port
+			} else {
+				listenAddr = port
+			}
+		} else {
+			listenAddr = ":8080"
+		}
+	}
+
 	cfg := Config{
 		RootDir:                root,
-		ListenAddr:             env("GO_LISTEN_ADDR", env("CHATGPT2API_LISTEN_ADDR", ":8080")),
-		DataDir:                resolvePath(root, env("GROK_DATA_DIR", "data")),
+		ListenAddr:             listenAddr,
+		DataDir:                resolvePath(root, env("GO_DATA_DIR", env("GROK_DATA_DIR", "data"))),
 		StaticDir:              resolvePath(root, env("GO_STATIC_DIR", "web_dist")),
 		ConfigPath:             resolvePath(root, env("GO_CONFIG_PATH", "config.json")),
 		AccountsPath:           resolvePath(root, env("GO_ACCOUNTS_PATH", "data/accounts.json")),
@@ -168,16 +175,6 @@ func Load(root string) (Config, error) {
 		OpenAIPlatformBaseURL:  strings.TrimRight(env("GO_OPENAI_PLATFORM_BASE_URL", "https://platform.openai.com"), "/"),
 		OpenAILoginTokenURL:    env("GO_OPENAI_LOGIN_TOKEN_URL", "https://auth.openai.com/api/accounts/oauth/token"),
 		OpenAIAgentRegisterURL: env("GO_OPENAI_AGENT_REGISTER_URL", "https://auth.openai.com/api/accounts/v1/agent/register"),
-		GrokChatURL:            env("GO_GROK_CHAT_URL", "https://grok.com/rest/app-chat/conversations/new"),
-		GrokRateLimitsURL:      env("GO_GROK_RATE_LIMITS_URL", "https://grok.com/rest/rate-limits"),
-		XAICLIBaseURL:          strings.TrimRight(env("GO_XAI_CLI_BASE_URL", "https://cli-chat-proxy.grok.com/v1"), "/"),
-		XAICLITokenURL:         env("GO_XAI_CLI_TOKEN_URL", "https://auth.x.ai/oauth2/token"),
-		ConsoleURL:             env("GO_CONSOLE_RESPONSES_URL", "https://console.x.ai/v1/responses"),
-		MediaChatURL:           env("GO_MEDIA_CHAT_URL", "https://grok.com/rest/app-chat/conversations/new"),
-		MediaPostURL:           env("GO_MEDIA_POST_URL", "https://grok.com/rest/media/post/create"),
-		AssetUploadURL:         env("GO_ASSET_UPLOAD_URL", "https://grok.com/rest/app-chat/upload-file"),
-		AssetsBaseURL:          env("GO_ASSETS_BASE_URL", "https://assets.grok.com"),
-		ImagineWSURL:           env("GO_IMAGINE_WS_URL", "wss://grok.com/ws/imagine/listen"),
 		ProxyURL:               strings.TrimSpace(os.Getenv("GO_PROXY_URL")),
 		ProxyPool:              splitList(os.Getenv("GO_PROXY_POOL")),
 		ResourceProxyURL:       strings.TrimSpace(os.Getenv("GO_RESOURCE_PROXY_URL")),
@@ -190,27 +187,23 @@ func Load(root string) (Config, error) {
 		RedisAddr:              env("GO_REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:          strings.TrimSpace(os.Getenv("GO_REDIS_PASSWORD")),
 		RedisDB:                envIntAllowZero("GO_REDIS_DB", 0),
-		OAuthDeviceURL:         env("GO_XAI_OAUTH_DEVICE_URL", "https://auth.x.ai/oauth2/device/code"),
-		OAuthTokenURL:          env("GO_XAI_OAUTH_TOKEN_URL", "https://auth.x.ai/oauth2/token"),
 		ImageDataDir:           resolvePath(root, env("GO_IMAGE_DATA_DIR", filepath.Join("data", "files", "images"))),
-		VideoDataDir:           resolvePath(root, env("GO_VIDEO_DATA_DIR", filepath.Join("data", "files", "videos"))),
-		OAuthPath:              resolvePath(root, env("GO_OAUTH_PATH", filepath.Join("data", "oauth_accounts.json.enc"))),
 		QueuePath:              resolvePath(root, env("GO_QUEUE_PATH", filepath.Join("data", "tasks.json"))),
-		RegisterPath:           resolvePath(root, env("GO_REGISTER_PATH", filepath.Join("data", "register.json"))),
-		GrokAccountsPath:       resolvePath(root, env("GO_GROK_ACCOUNTS_PATH", filepath.Join("data", "grok_accounts.json"))),
-		RegisterMailURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("GO_REGISTER_MAIL_URL")), "/"),
-		RegisterCaptchaURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("GO_REGISTER_CAPTCHA_URL")), "/"),
-		RegisterDriverURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("GO_REGISTER_DRIVER_URL")), "/"),
-		RegisterDriverKey:      strings.TrimSpace(os.Getenv("GO_REGISTER_DRIVER_KEY")),
-		Version:                env("GO_VERSION", "1.2.4-go"),
+		Version:                env("GO_VERSION", "3.2.3-go"),
 		AllowAnonymous:         envBool("GO_ALLOW_ANONYMOUS", false),
 		RequestTimeout:         time.Duration(requestTimeoutSeconds) * time.Second,
+		ConsoleRequestTimeout:  time.Duration(envInt("GO_CONSOLE_REQUEST_TIMEOUT_SECONDS", 600)) * time.Second,
+		ImagePollTimeout:       time.Duration(envInt("GO_IMAGE_POLL_TIMEOUT_SECONDS", 60)) * time.Second,
+		ImagePollInterval:      time.Duration(envInt("GO_IMAGE_POLL_INTERVAL_SECONDS", 5)) * time.Second,
+		ImagePollInitialWait:   time.Duration(envInt("GO_IMAGE_POLL_INITIAL_WAIT_SECONDS", 5)) * time.Second,
 		ChatMaxRetries:         chatMaxRetries,
 		ChatRetryCodes:         parseStatusCodes(env("GO_CHAT_RETRY_CODES", "401,403,429,500,502,503,504")),
 		ImageAccountLimit:      imageAccountConcurrency,
 		ImageMaxConcurrency:    imageMaxConcurrency,
 		ImageRetentionDays:     imageRetentionDays,
 		ImageCleanupInterval:   time.Duration(imageCleanupIntervalSeconds) * time.Second,
+		ChatDedupeEnabled:      envBool("GO_CHAT_DEDUPE_ENABLED", true),
+		ChatDedupeTTL:          time.Duration(envInt("GO_CHAT_DEDUPE_TTL_SECONDS", 60)) * time.Second,
 	}
 
 	rawConfig, err := readMap(cfg.ConfigPath)
@@ -243,6 +236,18 @@ func Load(root string) (Config, error) {
 	}
 	if cfg.APIKey == "" && cfg.AdminKey != "" {
 		cfg.APIKey = cfg.AdminKey
+	}
+	if val := configInt(rawConfig["image_poll_timeout_secs"]); val > 0 {
+		cfg.ImagePollTimeout = time.Duration(val) * time.Second
+	}
+	if val := configInt(rawConfig["image_poll_interval_secs"]); val > 0 {
+		cfg.ImagePollInterval = time.Duration(val) * time.Second
+	}
+	if val := configInt(rawConfig["image_poll_initial_wait_secs"]); val >= 0 && rawConfig["image_poll_initial_wait_secs"] != nil {
+		cfg.ImagePollInitialWait = time.Duration(val) * time.Second
+	}
+	if val := configInt(rawConfig["console_request_timeout_secs"]); val > 0 {
+		cfg.ConsoleRequestTimeout = time.Duration(val) * time.Second
 	}
 	applyProxyConfig(&cfg, rawConfig)
 

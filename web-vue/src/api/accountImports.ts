@@ -1,12 +1,10 @@
 import apiClient from './client'
-
-export interface AccountMutationResponse {
-  added?: number
-  skipped?: number
-  refreshed?: number
-  errors?: Array<{ token?: string; error?: string } | string>
-  items?: Array<Record<string, unknown>>
-}
+import type {
+  AccountMutationResponse,
+  AccountOperationEvent,
+  AccountOperationSummaryItem,
+  AccountOperationTone,
+} from './accounts'
 
 export interface OAuthLoginStartResponse {
   session_id: string
@@ -18,15 +16,44 @@ export interface OAuthLoginStartResponse {
 export interface CPAImportJob {
   job_id: string
   status: 'pending' | 'running' | 'completed' | 'failed'
+  stage: 'read_credentials' | 'save_accounts' | 'sync_accounts' | 'completed'
+  stage_label: string
+  stage_total: number
+  stage_completed: number
+  terminal: boolean
+  progress_total: number
+  progress_completed: number
+  status_label: string
+  tone: AccountOperationTone
+  error: string
+  summary_items: AccountOperationSummaryItem[]
+  result_message: string
+  result_tone: AccountOperationTone
   created_at: string
   updated_at: string
   total: number
   completed: number
   added: number
   skipped: number
-  refreshed: number
+  synced: number
   failed: number
-  errors: Array<{ name: string; error: string }>
+  failed_total: number
+  errors: Array<{ stage: 'fetch' | 'sync'; name: string; error: string }>
+  events?: AccountOperationEvent[]
+}
+
+export function remoteImportJobIsActive(job: CPAImportJob | null | undefined) {
+  return job?.status === 'pending' || job?.status === 'running'
+}
+
+export type RemoteAccountImportMode = 'cpa' | 'sub2api'
+
+export interface RemoteAccountImportStarted {
+  mode: RemoteAccountImportMode
+  source_id: string
+  job: CPAImportJob
+  title: string
+  total: number
 }
 
 export interface CPAPool {
@@ -48,7 +75,6 @@ export interface Sub2APIServer {
   email: string
   has_api_key: boolean
   group_id: string
-  verify_tls?: boolean
   import_job?: CPAImportJob | null
 }
 
@@ -62,7 +88,6 @@ export interface Sub2APIRemoteAccount {
   remote_group_id?: string
   remote_group_name?: string
   has_access_token?: boolean
-  has_refresh_token: boolean
 }
 
 export interface Sub2APIRemoteGroup {
@@ -88,10 +113,10 @@ export const accountImportsApi = {
       { email_hint: emailHint },
     ),
 
-  finishOAuthLogin: (sessionId: string, callback: string) =>
-    apiClient.post<{ session_id: string; callback: string }, AccountMutationResponse>(
+  finishOAuthLogin: (sessionId: string, callback: string, targetGroupId: string | null = null) =>
+    apiClient.post<{ session_id: string; callback: string; target_group_id: string | null }, AccountMutationResponse>(
       '/api/accounts/oauth/finish',
-      { session_id: sessionId, callback },
+      { session_id: sessionId, callback, target_group_id: targetGroupId },
     ),
 
   listCPAPools: () =>
@@ -119,10 +144,10 @@ export const accountImportsApi = {
       `/api/cpa/pools/${encodeURIComponent(poolId)}/files`,
     ),
 
-  startCPAImport: (poolId: string, names: string[]) =>
-    apiClient.post<{ names: string[] }, { import_job: CPAImportJob | null }>(
+  startCPAImport: (poolId: string, names: string[], targetGroupId: string | null = null) =>
+    apiClient.post<{ names: string[]; target_group_id: string | null }, { import_job: CPAImportJob | null }>(
       `/api/cpa/pools/${encodeURIComponent(poolId)}/import`,
-      { names },
+      { names, target_group_id: targetGroupId },
     ),
 
   getCPAImportJob: (poolId: string) =>
@@ -140,18 +165,9 @@ export const accountImportsApi = {
     password: string
     api_key: string
     group_id: string
-    verify_tls: boolean
   }) =>
     apiClient.post<
-      {
-        name: string
-        base_url: string
-        email: string
-        password: string
-        api_key: string
-        group_id: string
-        verify_tls: boolean
-      },
+      { name: string; base_url: string; email: string; password: string; api_key: string; group_id: string },
       { server: Sub2APIServer; servers: Sub2APIServer[] }
     >('/api/sub2api/servers', server),
 
@@ -164,19 +180,10 @@ export const accountImportsApi = {
       password?: string
       api_key?: string
       group_id?: string
-      verify_tls?: boolean
     },
   ) =>
     apiClient.post<
-      {
-        name?: string
-        base_url?: string
-        email?: string
-        password?: string
-        api_key?: string
-        group_id?: string
-        verify_tls?: boolean
-      },
+      { name?: string; base_url?: string; email?: string; password?: string; api_key?: string; group_id?: string },
       { server: Sub2APIServer; servers: Sub2APIServer[] }
     >(`/api/sub2api/servers/${encodeURIComponent(serverId)}`, updates),
 
@@ -202,10 +209,16 @@ export const accountImportsApi = {
     options: {
       group_bindings?: Sub2APIImportGroupBinding[]
       create_account_groups?: boolean
+      target_group_id?: string | null
     } = {},
   ) =>
     apiClient.post<
-      { account_ids: string[]; group_bindings?: Sub2APIImportGroupBinding[]; create_account_groups?: boolean },
+      {
+        account_ids: string[]
+        group_bindings?: Sub2APIImportGroupBinding[]
+        create_account_groups?: boolean
+        target_group_id?: string | null
+      },
       { import_job: CPAImportJob | null }
     >(
       `/api/sub2api/servers/${encodeURIComponent(serverId)}/import`,

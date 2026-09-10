@@ -57,7 +57,7 @@ var tinyPNG = []byte{
 
 func TestParseImageEditRequestAcceptsJSONDataURL(t *testing.T) {
 	server := &Server{}
-	body := `{"model":"grok-imagine-image-edit","prompt":"换成夜景","image_url":"data:image/png;base64,` + base64.StdEncoding.EncodeToString(tinyPNG) + `","n":1}`
+	body := `{"model":"gpt-image-2","prompt":"换成夜景","image_url":"data:image/png;base64,` + base64.StdEncoding.EncodeToString(tinyPNG) + `","n":1}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 
@@ -65,7 +65,7 @@ func TestParseImageEditRequestAcceptsJSONDataURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Prompt != "换成夜景" || parsed.Model != "grok-imagine-image-edit" || len(parsed.Inputs) != 1 {
+	if parsed.Prompt != "换成夜景" || parsed.Model != "gpt-image-2" || len(parsed.Inputs) != 1 {
 		t.Fatalf("unexpected parsed request: %#v", parsed)
 	}
 	if parsed.Inputs[0].MIME != "image/png" || len(parsed.Inputs[0].Data) != len(tinyPNG) {
@@ -184,6 +184,13 @@ func TestUpstreamStatusMapsDeadlineToGatewayTimeout(t *testing.T) {
 	}
 }
 
+func TestUpstreamStatusMapsContextCanceledTo499(t *testing.T) {
+	err := fmt.Errorf("client canceled stream: %w", context.Canceled)
+	if status := upstreamStatus(err); status != 499 {
+		t.Fatalf("expected client canceled status 499, got %d", status)
+	}
+}
+
 func TestEditableFileDownloadRequiresValidSignature(t *testing.T) {
 	root := t.TempDir()
 	fileRoot := filepath.Join(root, "files")
@@ -213,7 +220,7 @@ func TestParseImageEditRequestAcceptsMultipartImageAliases(t *testing.T) {
 	server := &Server{}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("model", "grok-imagine-image-edit")
+	_ = writer.WriteField("model", "gpt-image-2")
 	_ = writer.WriteField("prompt", "加一点玻璃反光")
 	part, err := writer.CreateFormFile("images[]", "source.png")
 	if err != nil {

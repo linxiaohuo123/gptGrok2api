@@ -4,42 +4,92 @@
       <div class="settings-check-grid settings-check-grid--single">
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="settings.auto_remove_invalid_accounts">自动移除异常账号</Checkbox>
+            <Checkbox
+              v-model="settings.auto_remove_invalid_accounts"
+              :disabled="fieldReadOnly('auto_remove_invalid_accounts')"
+            >自动移除异常账号</Checkbox>
             <HelpTip text="确认鉴权无效的账号会进入异常处理；开启后直接移除，关闭后保留异常状态。" />
           </div>
         </div>
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="settings.auto_remove_rate_limited_accounts">自动移除额度耗尽账号</Checkbox>
+            <Checkbox
+              v-model="settings.auto_remove_rate_limited_accounts"
+              :disabled="fieldReadOnly('auto_remove_rate_limited_accounts')"
+            >自动移除额度耗尽账号</Checkbox>
             <HelpTip text="只有远程明确确认图片额度为 0 时才会处理，代理错误、断流或上游 429 不会删除账号。" />
           </div>
         </div>
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox
+              v-model="settings.image_account_retry_enabled"
+              :disabled="fieldReadOnly('image_account_retry_enabled')"
+            >生图失败后尝试其他账号</Checkbox>
+            <HelpTip text="除文本结果（HTTP 400）外，当前账号未能交付图片时立即尝试其他账号；当前请求不会等待后台账号核验。" />
+          </div>
+        </div>
       </div>
+      <FormField label="最大尝试账号数">
+        <template #label-extra>
+          <HelpTip text="包含第一次使用的账号。默认 4，最小 2，不限制可填写的最大值。" />
+        </template>
+        <SettingsNumberInput
+          :field="imageMaxAccountAttemptsField"
+          :disabled="!settings.image_account_retry_enabled"
+        />
+      </FormField>
     </FormSection>
 
     <FormSection title="图片确认">
       <div class="settings-check-grid settings-check-grid--single">
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="settings.image_settle_enabled">图片二次确认机制</Checkbox>
+            <Checkbox
+              v-model="settings.image_settle_enabled"
+              :disabled="fieldReadOnly('image_settle_enabled')"
+            >图片二次确认机制</Checkbox>
             <HelpTip text="找到图片结果后再等待指定秒数复查一次，减少结果尚未稳定时提前返回。" />
           </div>
         </div>
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="settings.image_remove_conversation_after_result">图片成功后删除官网会话</Checkbox>
+            <Checkbox
+              v-model="settings.image_remove_conversation_after_result"
+              :disabled="fieldReadOnly('image_remove_conversation_after_result')"
+            >图片成功后删除官网会话</Checkbox>
             <HelpTip text="默认关闭。仅在图片已成功保存后尝试隐藏 ChatGPT 官网 conversation；失败只记录日志，不影响图片返回。关闭时保留官网会话，便于恢复和排查。" />
           </div>
         </div>
       </div>
       <FormField label="二次确认等待（秒）">
-        <Input
-          :model-value="imageSettleSecondsField.input.value"
-          type="number"
-          block
-          placeholder="5"
+        <SettingsNumberInput
+          :field="imageSettleSecondsField"
           :disabled="!settings.image_settle_enabled"
-          @update:model-value="imageSettleSecondsField.update"
+        />
+      </FormField>
+    </FormSection>
+
+    <FormSection title="图片放大">
+      <div class="settings-check-grid settings-check-grid--single">
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox
+              v-model="settings.image_upscale_enabled"
+              :disabled="fieldReadOnly('image_upscale_enabled')"
+            >图片尺寸不足时自动放大</Checkbox>
+            <HelpTip text="默认关闭。仅处理明确请求了尺寸且上游图片小于目标尺寸的结果；自动尺寸和已达到目标尺寸的图片保持原样。" />
+          </div>
+        </div>
+      </div>
+      <FormField label="放大引擎">
+        <GroupedSelectMenu
+          v-model="settings.image_upscale_engine"
+          :options="imageUpscaleEngineOptions"
+          :disabled="!settings.image_upscale_enabled || fieldReadOnly('image_upscale_engine')"
+          selected-indicator="none"
+          aria-label="图片放大引擎"
+          block
         />
       </FormField>
     </FormSection>
@@ -48,17 +98,18 @@
       <div class="settings-check-grid settings-check-grid--single mt-3">
         <div
           v-for="level in logLevelOptions"
-          :key="level"
+          :key="level.value"
           class="settings-check-item"
         >
           <div class="settings-check-control">
             <Checkbox
-              :model-value="settings.log_levels.includes(level)"
-              @update:model-value="$emit('setLogLevel', level, Boolean($event))"
+              :model-value="settings.log_levels.includes(level.value)"
+              :disabled="fieldReadOnly('log_levels')"
+              @update:model-value="$emit('setLogLevel', level.value, Boolean($event))"
             >
-              {{ level }}
+              {{ level.label }}
             </Checkbox>
-            <HelpTip v-if="level === 'debug'" text="不选择任何级别时使用默认 info / warning / error。" />
+            <HelpTip v-if="level.value === 'debug'" text="不选择任何级别时使用默认 info / warning / error。" />
           </div>
         </div>
       </div>
@@ -67,19 +118,36 @@
 </template>
 
 <script setup lang="ts">
-import { Checkbox, FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
+import { computed } from 'vue'
+import { Checkbox, FormField, FormSection, HelpTip } from 'nanocat-ui'
+import { GroupedSelectMenu } from 'nanocat-ui'
 import type { Settings } from '@/types/api'
-import { logLevelOptions } from '@/views/settings/settingsView'
+import SettingsNumberInput from '@/views/settings/SettingsNumberInput.vue'
+import {
+  settingsFieldOptions,
+  settingsFieldReadOnly,
+  type SettingsFields,
+} from '@/views/settings/settingsView'
 import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 
-defineProps<{
+const props = defineProps<{
   settings: Settings
+  fields: SettingsFields
+  imageMaxAccountAttemptsField: NumberSettingField
   imageSettleSecondsField: NumberSettingField
 }>()
 
 defineEmits<{
   setLogLevel: [level: string, enabled: boolean]
 }>()
+
+const fieldReadOnly = (path: string) => settingsFieldReadOnly(props.fields, path)
+const imageUpscaleEngineOptions = computed(() => (
+  settingsFieldOptions(props.fields, 'image_upscale_engine', props.settings.image_upscale_engine)
+))
+const logLevelOptions = computed(() => (
+  settingsFieldOptions(props.fields, 'log_levels', props.settings.log_levels)
+))
 </script>
 
 <style scoped>

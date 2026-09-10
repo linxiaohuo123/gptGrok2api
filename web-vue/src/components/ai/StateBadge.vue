@@ -3,6 +3,8 @@
     :tone="props.tone"
     variant="soft"
     :size="props.size"
+    :radius="props.shape"
+    :bordered="props.bordered"
     :chip-class="chipClass"
   >
     <slot />
@@ -28,7 +30,6 @@ const props = withDefaults(defineProps<{
 const chipClass = computed(() => [
   'state-badge',
   `state-badge--size-${props.size}`,
-  props.bordered ? '' : '!border-transparent',
 ].filter(Boolean).join(' '))
 </script>
 

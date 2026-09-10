@@ -1,6 +1,6 @@
 import { watch, type Ref } from 'vue'
 
-import { usePageDebouncedAction } from '@/composables/usePageQuery'
+import { usePageDebouncedAction, usePageVisibilityReload } from '@/composables/usePageQuery'
 import type { PageRuntime } from '@/composables/usePageRuntime'
 import {
   getNumberPreference,
@@ -28,6 +28,7 @@ type AccountPageLifecycleRuntimeOptions = {
   invalidateData: () => void
   invalidateGroups: () => void
   clearSelection: () => void
+  clearPageSelection: () => void
   shouldSkipRefresh: () => boolean
 }
 
@@ -102,7 +103,7 @@ export function useAccountPageLifecycleRuntime(options: AccountPageLifecycleRunt
   })
 
   watch(options.currentPage, () => {
-    options.clearSelection()
+    options.clearPageSelection()
   })
 
   options.runtime.onActivate(({ initial }) => {
@@ -122,14 +123,11 @@ export function useAccountPageLifecycleRuntime(options: AccountPageLifecycleRunt
     invalidate()
   })
 
-  options.runtime.onHide(() => {
-    invalidate()
-  })
-
-  options.runtime.onShow(() => {
-    if (!ready) return
-    if (options.shouldSkipRefresh()) return
-    void refresh(true)
+  usePageVisibilityReload({
+    runtime: options.runtime,
+    invalidate,
+    reload: () => refresh(true),
+    shouldReload: () => !options.shouldSkipRefresh(),
   })
 
   return {

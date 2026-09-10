@@ -1,8 +1,14 @@
+// [INPUT]: provider
+// [OUTPUT]: 账号 AT 刷新：accountRefreshStart、进度查询、单账号刷新
+// [POS]: 异步刷新任务调度与进度汇报。保留最近有限历史（50条），杜绝长期运行内存泄漏。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,6 +28,7 @@ type accountRefreshProgress struct {
 	StatusCounts map[string]int `json:"status_counts"`
 	TotalQuota   int            `json:"total_quota"`
 	Result       map[string]any `json:"result,omitempty"`
+	createdAt    time.Time
 }
 
 func (s *Server) accountAccessTokenRefresh(w http.ResponseWriter, r *http.Request) {
@@ -34,13 +41,24 @@ func (s *Server) accountAccessTokenRefresh(w http.ResponseWriter, r *http.Reques
 	}
 	var body struct {
 		AccessTokens []string `json:"access_tokens"`
+		AccountIDs   []string `json:"account_ids"`
+		Selection    *struct {
+			AccountIDs         []string `json:"account_ids"`
+			ExcludedAccountIDs []string `json:"excluded_account_ids"`
+			Mode               string   `json:"mode"`
+		} `json:"selection"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	refs := uniqueAccountRefs(body.AccessTokens)
+	rawRefs := append([]string{}, body.AccessTokens...)
+	rawRefs = append(rawRefs, body.AccountIDs...)
+	if body.Selection != nil {
+		rawRefs = append(rawRefs, body.Selection.AccountIDs...)
+	}
+	refs := uniqueAccountRefs(rawRefs)
 	if len(refs) == 0 {
-		writeError(w, http.StatusBadRequest, "access_tokens is required", "invalid_request_error")
+		writeError(w, http.StatusBadRequest, "access_tokens or account_ids is required", "invalid_request_error")
 		return
 	}
 	updated := 0
@@ -78,13 +96,18 @@ func (s *Server) accountRefreshStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		accountSelectionBody
 		AccessTokens []string `json:"access_tokens"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	refs := uniqueAccountRefs(body.AccessTokens)
+	// 必须认 account_ids / selection：前端永远发这两种形态之一，而这里原本只读
+	// access_tokens。读不到就落进下面的"全量"兜底，于是"同步选中的 3 个账号"
+	// 实际刷新的是**整个账号池**——故障域越界，且用户看不到任何异常。
+	refs := uniqueAccountRefs(append(append([]string{}, body.AccessTokens...), body.refs()...))
 	if len(refs) == 0 {
+		// 只有请求里确实没带任何目标时，才把它理解为"全量同步"。
 		items, err := s.store.AccountList()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -98,20 +121,50 @@ func (s *Server) accountRefreshStart(w http.ResponseWriter, r *http.Request) {
 		refs = uniqueAccountRefs(refs)
 	}
 	if len(refs) == 0 {
-		writeError(w, http.StatusBadRequest, "access_tokens is required", "invalid_request_error")
+		writeError(w, http.StatusBadRequest, "access_tokens or account_ids is required", "invalid_request_error")
 		return
 	}
 
+	const maxRefreshProgressHistory = 50
 	progressID := newChatID()
 	s.refreshMu.Lock()
+	s.pruneRefreshProgressLocked(maxRefreshProgressHistory)
 	s.refreshProgress[progressID] = &accountRefreshProgress{
 		Total:        len(refs),
 		StatusCounts: map[string]int{"正常": 0, "限流": 0, "异常": 0, "禁用": 0},
+		createdAt:    time.Now(),
 	}
 	s.refreshMu.Unlock()
 
 	go s.runAccountRefresh(progressID, refs)
 	writeJSON(w, http.StatusOK, map[string]any{"progress_id": progressID})
+}
+
+func (s *Server) pruneRefreshProgressLocked(maxCapacity int) {
+	if len(s.refreshProgress) < maxCapacity {
+		return
+	}
+	var candidateID string
+	var candidateTime time.Time
+	for id, p := range s.refreshProgress {
+		if p.Done {
+			if candidateID == "" || p.createdAt.Before(candidateTime) {
+				candidateID = id
+				candidateTime = p.createdAt
+			}
+		}
+	}
+	if candidateID == "" {
+		for id, p := range s.refreshProgress {
+			if candidateID == "" || p.createdAt.Before(candidateTime) {
+				candidateID = id
+				candidateTime = p.createdAt
+			}
+		}
+	}
+	if candidateID != "" {
+		delete(s.refreshProgress, candidateID)
+	}
 }
 
 func (s *Server) accountRefreshProgressAPI(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +176,8 @@ func (s *Server) accountRefreshProgressAPI(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/accounts/refresh/progress/")
+	id = strings.TrimPrefix(id, "/api/accounts/operations/")
+	id = strings.Trim(id, "/")
 	if id == "" || strings.Contains(id, "/") {
 		writeError(w, http.StatusNotFound, "progress not found", "not_found")
 		return
@@ -140,7 +195,36 @@ func (s *Server) accountRefreshProgressAPI(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "progress not found", "not_found")
 		return
 	}
-	writeJSON(w, http.StatusOK, progress)
+	counts := map[string]int{
+		"updated": progress.Processed,
+		"errors":  progress.StatusCounts["failed"] + progress.StatusCounts["error"],
+	}
+	message := fmt.Sprintf("已处理 %d/%d", progress.Processed, progress.Total)
+	if progress.Done {
+		message = fmt.Sprintf("已完成 %d 个账号", progress.Processed)
+	}
+	response := map[string]any{
+		"total":         progress.Total,
+		"processed":     progress.Processed,
+		"done":          progress.Done,
+		"status_counts": progress.StatusCounts,
+		"total_quota":   progress.TotalQuota,
+	}
+	if progress.Error != "" {
+		response["error"] = progress.Error
+	}
+	if progress.Result != nil {
+		response["result"] = progress.Result
+	}
+	// 轮询响应同样要带展示投影：前端 accountOperationPresentation 对它强校验，
+	// 缺了就在 while 循环的第一次迭代抛错——同步与刷新 AT 因此根本进不去。
+	mergeAccountMutation(response, message, counts)
+	if !progress.Done {
+		// 未完成的轮询既不是成功也不是失败，语气必须是 info。
+		response["tone"] = "info"
+		response["status_label"] = accountMutationStatusLabel("info")
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) runAccountRefresh(progressID string, refs []string) {

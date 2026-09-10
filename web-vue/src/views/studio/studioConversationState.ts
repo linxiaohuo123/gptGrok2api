@@ -23,6 +23,11 @@ export type StudioImageTaskMessageEntry = {
   message: StudioMessage
 }
 
+export type StudioFileTaskMessageEntry = {
+  conversation: StudioConversation
+  message: StudioMessage
+}
+
 export type StudioConversationLookup = {
   byId: Map<string, StudioConversation>
   validIds: Set<string>
@@ -30,8 +35,10 @@ export type StudioConversationLookup = {
 
 export type StudioConversationRuntimeIndex = {
   pendingImageTaskIds: string[]
+  pendingFileTaskIds: string[]
   runningCounts: Record<string, number>
   imageTaskMessageEntries: StudioImageTaskMessageEntry[]
+  fileTaskMessageEntries: StudioFileTaskMessageEntry[]
 }
 
 export function createStudioId(prefix: string) {
@@ -95,17 +102,25 @@ export function buildStudioConversationLookup(conversations: StudioConversation[
 }
 
 export function buildStudioConversationRuntimeIndex(conversations: StudioConversation[]): StudioConversationRuntimeIndex {
-  const pendingIds = new Set<string>()
+  const pendingImageIds = new Set<string>()
+  const pendingFileIds = new Set<string>()
   const runningCounts: Record<string, number> = {}
   const imageTaskMessageEntries: StudioImageTaskMessageEntry[] = []
+  const fileTaskMessageEntries: StudioFileTaskMessageEntry[] = []
 
   conversations.forEach((conversation) => {
     let running = 0
     conversation.messages.forEach((message) => {
-      if (message.taskId) imageTaskMessageEntries.push({ conversation, message })
+      if (message.mode === 'image' && message.taskId) imageTaskMessageEntries.push({ conversation, message })
+      if (message.mode === 'file' && message.fileTaskId && !message.fileTaskDeleted) {
+        fileTaskMessageEntries.push({ conversation, message })
+      }
       if (isStudioImageMessageRunning(message)) {
         running += 1
-        if (message.taskId) pendingIds.add(message.taskId)
+        if (message.taskId) pendingImageIds.add(message.taskId)
+      } else if (isStudioFileMessageRunning(message)) {
+        running += 1
+        if (message.fileTaskId) pendingFileIds.add(message.fileTaskId)
       } else if (message.status === 'sending' || message.status === 'streaming') {
         running += 1
       }
@@ -115,14 +130,20 @@ export function buildStudioConversationRuntimeIndex(conversations: StudioConvers
   })
 
   return {
-    pendingImageTaskIds: Array.from(pendingIds).slice(0, 160),
+    pendingImageTaskIds: Array.from(pendingImageIds).slice(0, 160),
+    pendingFileTaskIds: Array.from(pendingFileIds).slice(0, 160),
     runningCounts,
     imageTaskMessageEntries,
+    fileTaskMessageEntries,
   }
 }
 
 export function isStudioImageMessageRunning(message: StudioMessage) {
   return message.mode === 'image' && (message.status === 'queued' || message.status === 'running')
+}
+
+export function isStudioFileMessageRunning(message: StudioMessage) {
+  return message.mode === 'file' && (message.status === 'queued' || message.status === 'running')
 }
 
 function normalizeStudioConversation(item: unknown): StudioConversation | null {
@@ -145,9 +166,11 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
   const raw = item as Partial<StudioMessage>
   const content = cleanStudioText(raw.content)
   const taskId = cleanStudioText(raw.taskId)
-  if (!content && !taskId) return null
+  const fileTaskId = cleanStudioText(raw.fileTaskId)
+  const fileTaskDeleted = raw.fileTaskDeleted === true
+  if (!content && !taskId && !fileTaskId && !fileTaskDeleted) return null
   const id = cleanStudioText(raw.id) || createStudioId('message')
-  const mode = raw.mode === 'chat' || raw.mode === 'search' ? raw.mode : 'image'
+  const mode = raw.mode === 'chat' || raw.mode === 'search' || raw.mode === 'file' ? raw.mode : 'image'
   const normalizedContent = mode === 'search' ? cleanStudioSearchAnswer(content) : content
   const migratedSearchResult = mode === 'search'
     ? splitStudioLegacySearchResult(normalizedContent)
@@ -170,6 +193,9 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
     imageSize: cleanStudioText(raw.imageSize) || undefined,
     imageCount: Number.isFinite(Number(raw.imageCount)) ? normalizeImageCount(raw.imageCount) : undefined,
     taskId: taskId || undefined,
+    fileTaskId: fileTaskId || undefined,
+    fileTaskDeleted: mode === 'file' && fileTaskDeleted ? true : undefined,
+    fileKind: mode === 'file' && raw.fileKind === 'psd' ? 'psd' : mode === 'file' ? 'ppt' : undefined,
     error: cleanStudioText(raw.error) || undefined,
     attachments: Array.isArray(raw.attachments) ? raw.attachments.map(cleanStudioText).filter(Boolean).slice(0, 8) : undefined,
     referenceImages: normalizeStudioReferenceImages(raw.referenceImages),

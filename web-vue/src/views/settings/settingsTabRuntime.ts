@@ -1,6 +1,7 @@
 import { watch, type Ref } from 'vue'
 
 import type { usePageRuntime } from '@/composables/usePageRuntime'
+import { usePageVisibilityReload } from '@/composables/usePageQuery'
 
 type SettingsTabLoader = {
   tabs: readonly string[]
@@ -53,8 +54,14 @@ export function useSettingsTabRuntime(options: SettingsTabRuntimeOptions) {
     invalidate()
   })
 
-  options.runtime.onHide(() => {
-    invalidate()
+  usePageVisibilityReload({
+    runtime: options.runtime,
+    invalidate,
+    reload: async () => {
+      await options.reloadSettings()
+      await loadActiveTabData(true)
+    },
+    shouldReload: () => !options.shouldSkipActivateReload(),
   })
 
   return {

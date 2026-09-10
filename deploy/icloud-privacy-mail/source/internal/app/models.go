@@ -82,7 +82,6 @@ type Mailbox struct {
 	ICloudActive      bool      `json:"icloud_active"`
 	ReceiveCount      int       `json:"receive_count"`
 	OpenAIClaimed     bool      `json:"openai_claimed,omitempty"`
-	GrokClaimed       bool      `json:"grok_claimed,omitempty"`
 	Status            string    `json:"status"`
 	Note              string    `json:"note"`
 	LastSyncAt        time.Time `json:"last_sync_at,omitempty"`
@@ -303,7 +302,6 @@ type publicMailbox struct {
 	ICloudActive       bool   `json:"icloud_active"`
 	ReceiveCount       int    `json:"receive_count"`
 	OpenAIClaimed      bool   `json:"openai_claimed"`
-	GrokClaimed        bool   `json:"grok_claimed"`
 	Status             string `json:"status"`
 	Note               string `json:"note"`
 	LastSyncAt         string `json:"last_sync_at,omitempty"`

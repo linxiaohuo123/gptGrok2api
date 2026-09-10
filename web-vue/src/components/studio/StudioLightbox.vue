@@ -32,23 +32,26 @@ const lightboxFile = computed<GalleryFile | null>(() => {
   const preview = props.preview
   if (!preview) return null
   return {
+    id: preview.localPath || preview.src,
     filename: preview.name || 'studio-preview-image',
     path: preview.localPath || preview.src,
     url: preview.src,
     thumbnail_url: preview.src,
-    size: 0,
+    size_bytes: 0,
     created_at: '',
-    mtime: 0,
     date: '',
-    type: 'image',
+    media_type: 'image',
     expired: false,
+    expires_at: null,
     expires_in_seconds: null,
     tags: [],
     storage: 'studio',
     local: Boolean(preview.localPath),
     webdav: false,
+    available: true,
     width: null,
     height: null,
+    genbox_push: null,
   }
 })
 

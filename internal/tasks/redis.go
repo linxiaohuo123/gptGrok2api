@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（net、sync）
+// [OUTPUT]: Redis 队列：NewRedis、Submit/Get/Cancel/List、BLPOP 消费
+// [POS]: 手写 RESP 协议实现。命令超时由 command() 统一兜底。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package tasks
 
 import (
@@ -198,7 +203,17 @@ func (q *RedisQueue) taskKey(id string) string { return q.prefix + ":task:" + id
 func (q *RedisQueue) queueKey() string         { return q.prefix + ":tasks:queue" }
 func (q *RedisQueue) indexKey() string         { return q.prefix + ":tasks:index" }
 
+// Redis 命令必须自带超时：所有调用点传的都是 context.Background()，
+// 一旦对端假死（accept 却不回包），读就会无限期阻塞、worker 从此不再消费。
+// 上限必须大于 BLPOP 的 5 秒阻塞窗口。
+const redisCommandTimeout = 10 * time.Second
+
 func (q *RedisQueue) command(ctx context.Context, args ...string) (any, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, redisCommandTimeout)
+		defer cancel()
+	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", q.addr)
 	if err != nil {
 		return nil, err

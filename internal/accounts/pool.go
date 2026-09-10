@@ -1,3 +1,8 @@
+// [INPUT]: internal/store 的账号快照
+// [OUTPUT]: 账号池：New、Acquire*、Lease、Feedback、Snapshot
+// [POS]: 账号资源的唯一分配点。成对释放租约，Feedback 严格隔离客户端中断(499)与请求级错误(400)，仅对上游基础设施故障施加惩罚。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package accounts
 
 import (
@@ -66,8 +71,7 @@ func (p *Pool) Reserve(ctx context.Context, pools []string, excluded map[string]
 }
 
 // ReserveMatching is the common account leasing path with an optional
-// provider predicate. This keeps OpenAI JWT accounts separate from Grok SSO
-// accounts even when both are stored in the same account file.
+// account predicate.
 func (p *Pool) ReserveMatching(ctx context.Context, pools []string, excluded map[string]bool, match func(Account) bool) (*Lease, error) {
 	return p.ReserveMatchingLimit(ctx, pools, excluded, match, 0)
 }
@@ -160,6 +164,23 @@ func (p *Pool) signalLocked() {
 
 func (p *Pool) Feedback(account Account, status int, err error) {
 	if account.Token == "" {
+		return
+	}
+	if status == 499 || errors.Is(err, context.Canceled) {
+		return
+	}
+	// 故障域隔离：400 等客户端请求级错误（如审查拦截、提示词违规、参数非法）不属于账号基础设施故障。
+	// 严禁对 400 自增失败计数，严禁打入 Cooldown，严禁将账号标记异常，彻底消灭全池雪崩死角。
+	if status >= 400 && status < 500 && status != 401 && status != 429 {
+		updates := map[string]any{
+			"last_error_kind":   "request_error",
+			"last_error_status": status,
+			"last_error_at":     time.Now().UTC().Format(time.RFC3339),
+		}
+		if err != nil {
+			updates["last_error_message"] = truncate(err.Error(), 300)
+		}
+		_, _ = p.repository.UpdateAccountRuntime(account.Token, updates)
 		return
 	}
 	p.mu.Lock()

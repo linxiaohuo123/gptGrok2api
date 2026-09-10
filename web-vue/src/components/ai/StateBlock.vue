@@ -5,6 +5,7 @@
     :class="{
       'state-block--compact': compact,
       'state-block--dashed': dashed,
+      'state-block--plain': plain,
     }"
   >
     <div v-if="$slots.media" class="state-block__media">
@@ -23,12 +24,14 @@ withDefaults(defineProps<{
   description?: string
   compact?: boolean
   dashed?: boolean
+  plain?: boolean
 }>(), {
   tag: 'div',
   title: '',
   description: '',
   compact: false,
   dashed: false,
+  plain: false,
 })
 </script>
 
@@ -50,6 +53,17 @@ withDefaults(defineProps<{
 
 .state-block--dashed {
   border-style: dashed;
+}
+
+.state-block--plain {
+  min-height: 7rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.state-block--plain.state-block--compact {
+  min-height: 5rem;
 }
 
 .state-block__media {

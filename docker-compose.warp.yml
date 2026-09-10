@@ -1,32 +1,4 @@
 services:
-  init-config:
-    image: python:3.13-alpine
-    container_name: chatgpt2api-warp-init
-    working_dir: /app
-    volumes:
-      - ./config.json:/app/config.json
-      - ./scripts:/app/scripts:ro
-      - ./data:/app/data
-    environment:
-      CHATGPT2API_CONFIG_FILE: /app/config.json
-      CHATGPT2API_PROXY_RUNTIME_ENABLED: ${CHATGPT2API_PROXY_RUNTIME_ENABLED:-true}
-      CHATGPT2API_PROXY_RUNTIME_EGRESS_MODE: ${CHATGPT2API_PROXY_RUNTIME_EGRESS_MODE:-single_proxy}
-      CHATGPT2API_PROXY_RUNTIME_PROXY_URL: ${CHATGPT2API_PROXY_RUNTIME_PROXY_URL:-http://privoxy:8118}
-      CHATGPT2API_PROXY_RUNTIME_RESOURCE_PROXY_URL: ${CHATGPT2API_PROXY_RUNTIME_RESOURCE_PROXY_URL:-}
-      CHATGPT2API_PROXY_RUNTIME_SKIP_SSL_VERIFY: ${CHATGPT2API_PROXY_RUNTIME_SKIP_SSL_VERIFY:-false}
-      CHATGPT2API_PROXY_RUNTIME_RESET_STATUS_CODES: ${CHATGPT2API_PROXY_RUNTIME_RESET_STATUS_CODES:-403}
-      CHATGPT2API_PROXY_RUNTIME_CLEARANCE_ENABLED: ${CHATGPT2API_PROXY_RUNTIME_CLEARANCE_ENABLED:-true}
-      CHATGPT2API_PROXY_RUNTIME_CLEARANCE_MODE: ${CHATGPT2API_PROXY_RUNTIME_CLEARANCE_MODE:-flaresolverr}
-      CHATGPT2API_PROXY_RUNTIME_CLEARANCE_TIMEOUT_SEC: ${CHATGPT2API_PROXY_RUNTIME_CLEARANCE_TIMEOUT_SEC:-60}
-      CHATGPT2API_PROXY_RUNTIME_CLEARANCE_REFRESH_INTERVAL: ${CHATGPT2API_PROXY_RUNTIME_CLEARANCE_REFRESH_INTERVAL:-3600}
-      CHATGPT2API_PROXY_RUNTIME_WARM_UP_ON_START: ${CHATGPT2API_PROXY_RUNTIME_WARM_UP_ON_START:-false}
-      CHATGPT2API_PROXY_RUNTIME_BROWSER: ${CHATGPT2API_PROXY_RUNTIME_BROWSER:-chrome}
-      CHATGPT2API_PROXY_RUNTIME_USER_AGENT: ${CHATGPT2API_PROXY_RUNTIME_USER_AGENT:-}
-      CHATGPT2API_FLARESOLVERR_URL: ${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
-      GROK_CONFIG_FILE: /app/data/grok_runtime/config.toml
-    command: ["python3", "/app/scripts/init_proxy_config.py"]
-    restart: "no"
-
   warp-proxy:
     image: caomingjun/warp:latest
     container_name: chatgpt2api-warp-proxy
@@ -122,8 +94,6 @@ services:
     container_name: chatgpt2api-warp
     restart: unless-stopped
     depends_on:
-      init-config:
-        condition: service_completed_successfully
       privoxy:
         condition: service_started
       flaresolverr:
@@ -143,6 +113,7 @@ services:
       GIT_FILE_PATH: ${GIT_FILE_PATH:-accounts.json}
       GIT_AUTH_KEYS_FILE_PATH: ${GIT_AUTH_KEYS_FILE_PATH:-auth_keys.json}
       CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
+      CHATGPT2API_ADMIN_KEY: ${CHATGPT2API_ADMIN_KEY:-}
       CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
       CHATGPT2API_TRUST_REQUEST_HOST: ${CHATGPT2API_TRUST_REQUEST_HOST:-false}
       CHATGPT2API_ALLOW_PRIVATE_IMAGE_URLS: ${CHATGPT2API_ALLOW_PRIVATE_IMAGE_URLS:-false}
@@ -152,9 +123,12 @@ services:
       IMAGE_SCHEDULER_INTERNAL_KEY: ${IMAGE_SCHEDULER_INTERNAL_KEY:-}
       CHATGPT2API_HOST_PRIVOXY_URL: ${CHATGPT2API_HOST_PRIVOXY_URL:-http://privoxy:8118}
       ICLOUD_PRIVACY_MAIL_BASE_URL: ${ICLOUD_PRIVACY_MAIL_BASE_URL:-http://icloud-privacy-mail:8787}
+      # 必须与 sidecar 的 IPM_API_KEY 成对：主程序只在密钥非空时才带 Authorization，
+      # 而 sidecar 在期望值为空时直接拒绝。此前这里只给了 BASE_URL，iCloud 取号 100% 401。
+      ICLOUD_PRIVACY_MAIL_API_KEY: ${ICLOUD_PRIVACY_MAIL_API_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1/grok/health', timeout=3)\" || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3

@@ -1,6 +1,13 @@
 import { computed, ref } from 'vue'
 
-import { accountImportsApi, type CPAPool, type Sub2APIRemoteGroup, type Sub2APIServer } from '@/api/accountImports'
+import {
+  accountImportsApi,
+  remoteImportJobIsActive,
+  type CPAPool,
+  type Sub2APIRemoteGroup,
+  type Sub2APIServer,
+} from '@/api/accountImports'
+import { accountsApi, type AccountGroup } from '@/api/accounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import type { usePageRuntime } from '@/composables/usePageRuntime'
 import { usePageQuery } from '@/composables/usePageQuery'
@@ -21,6 +28,7 @@ type SettingsExternalSourcesRuntimeOptions = {
 }
 
 export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourcesRuntimeOptions) {
+  let externalSourcesLoadGeneration = 0
   const externalSourcesLoaded = ref(false)
   const cpaLoading = ref(false)
   const sub2apiLoading = ref(false)
@@ -31,11 +39,14 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
   const remoteImportCPAPoolId = ref('')
   const remoteImportSub2APIServerId = ref('')
   const remoteImportSub2APIGroupId = ref<string | undefined>(undefined)
+  const remoteImportTargetGroupValue = ref('__preserve__')
   const remoteImportBusy = ref(false)
+  const accountGroups = ref<AccountGroup[]>([])
+  const accountGroupsLoading = ref(false)
+  const accountGroupsLoaded = ref(false)
   const cpaPools = ref<CPAPool[]>([])
   const sub2apiServers = ref<Sub2APIServer[]>([])
   const sub2apiGroups = ref<Record<string, Sub2APIRemoteGroup[]>>({})
-  const sub2apiGroupsLoadingId = ref('')
   const editingCPAPoolId = ref('')
   const editingSub2APIId = ref('')
   const cpaForm = ref(createCPAForm())
@@ -43,6 +54,10 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
   const externalSourcesLoading = computed(() => cpaLoading.value || sub2apiLoading.value)
+  const remoteImportActive = computed(() => (
+    [...cpaPools.value, ...sub2apiServers.value]
+      .some((source) => remoteImportJobIsActive(source.import_job))
+  ))
 
   const cpaPoolsQuery = usePageQuery({
     runtime: options.runtime,
@@ -219,7 +234,6 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
             base_url: payload.base_url,
             email: payload.email,
             group_id: payload.group_id,
-            verify_tls: payload.verify_tls,
             ...(payload.password ? { password: payload.password } : {}),
             ...(payload.api_key ? { api_key: payload.api_key } : {}),
           })
@@ -260,30 +274,6 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
     }
   }
 
-  async function loadSub2APIGroups(server: Sub2APIServer) {
-    const confirmed = await confirmDialog.ask({
-      title: '加载 Sub2API 分组',
-      message: `即将访问 Sub2API 连接 ${server.name || server.base_url || server.id} 并读取远程分组列表。请确认当前允许连接该外部服务。`,
-      confirmText: '确认加载',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    sub2apiGroupsLoadingId.value = server.id
-    try {
-      const response = await accountImportsApi.listSub2APIServerGroups(server.id)
-      sub2apiGroups.value = {
-        ...sub2apiGroups.value,
-        [server.id]: Array.isArray(response.groups) ? response.groups : [],
-      }
-      if (!response.groups?.length) toast.info('这个 Sub2API 连接没有返回分组')
-    } catch (error) {
-      toast.error(errorMessage(error, '读取 Sub2API 分组失败'))
-    } finally {
-      sub2apiGroupsLoadingId.value = ''
-    }
-  }
-
   async function testSub2APIServer(server: Sub2APIServer) {
     const confirmed = await confirmDialog.ask({
       title: '测试 Sub2API 连接',
@@ -308,24 +298,71 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
     }
   }
 
+  async function loadAccountGroups() {
+    if (accountGroupsLoading.value || accountGroupsLoaded.value) return
+    accountGroupsLoading.value = true
+    try {
+      const response = await accountsApi.listGroups()
+      accountGroups.value = Array.isArray(response.groups) ? response.groups : []
+      accountGroupsLoaded.value = true
+    } catch (error) {
+      toast.error(errorMessage(error, '加载账号组失败'))
+    } finally {
+      accountGroupsLoading.value = false
+    }
+  }
+
   function openCPAImport(pool: CPAPool) {
+    if (remoteImportActive.value) {
+      toast.warning('请等待当前账号导入任务完成')
+      return
+    }
     remoteImportCPAPoolId.value = pool.id
     remoteImportSub2APIServerId.value = ''
     remoteImportSub2APIGroupId.value = undefined
+    remoteImportTargetGroupValue.value = '__preserve__'
     remoteImportBusy.value = false
     remoteImportModal.value = 'cpa'
+    void loadAccountGroups()
   }
 
   function openSub2APIImport(server: Sub2APIServer, groupId?: string) {
+    if (remoteImportActive.value) {
+      toast.warning('请等待当前账号导入任务完成')
+      return
+    }
     remoteImportCPAPoolId.value = ''
     remoteImportSub2APIServerId.value = server.id
     remoteImportSub2APIGroupId.value = groupId
+    remoteImportTargetGroupValue.value = '__preserve__'
     remoteImportBusy.value = false
     remoteImportModal.value = 'sub2api'
+    void loadAccountGroups()
+  }
+
+  function applyRemoteImportStarted(
+    mode: 'cpa' | 'sub2api',
+    sourceId: string,
+    importJob: CPAPool['import_job'],
+  ) {
+    if (mode === 'cpa') {
+      cpaPools.value = cpaPools.value.map((pool) => (
+        pool.id === sourceId ? { ...pool, import_job: importJob } : pool
+      ))
+      return
+    }
+    sub2apiServers.value = sub2apiServers.value.map((server) => (
+      server.id === sourceId ? { ...server, import_job: importJob } : server
+    ))
   }
 
   function closeRemoteImportModal() {
     if (remoteImportBusy.value) return
+    handoffRemoteImport()
+  }
+
+  function handoffRemoteImport() {
+    remoteImportBusy.value = false
     remoteImportModal.value = ''
     remoteImportCPAPoolId.value = ''
     remoteImportSub2APIServerId.value = ''
@@ -340,10 +377,12 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
   }
 
   async function loadExternalSources() {
+    const generation = ++externalSourcesLoadGeneration
     await Promise.allSettled([
       loadCPAPools(),
       loadSub2APIServers(),
     ])
+    if (generation !== externalSourcesLoadGeneration || !options.runtime.canRun.value) return
     externalSourcesLoaded.value = true
   }
 
@@ -352,6 +391,7 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
   }
 
   function invalidate() {
+    externalSourcesLoadGeneration += 1
     cpaPoolsQuery.invalidate()
     sub2apiServersQuery.invalidate()
     externalSourcesLoaded.value = false
@@ -368,11 +408,14 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
     remoteImportCPAPoolId,
     remoteImportSub2APIServerId,
     remoteImportSub2APIGroupId,
+    remoteImportTargetGroupValue,
     remoteImportBusy,
+    remoteImportActive,
+    accountGroups,
+    accountGroupsLoading,
     cpaPools,
     sub2apiServers,
     sub2apiGroups,
-    sub2apiGroupsLoadingId,
     editingCPAPoolId,
     editingSub2APIId,
     cpaForm,
@@ -391,11 +434,13 @@ export function useSettingsExternalSourcesRuntime(options: SettingsExternalSourc
     loadSub2APIServers,
     saveSub2APIServer,
     deleteSub2APIServer,
-    loadSub2APIGroups,
     testSub2APIServer,
+    loadAccountGroups,
     openCPAImport,
     openSub2APIImport,
+    applyRemoteImportStarted,
     closeRemoteImportModal,
+    handoffRemoteImport,
     closeExternalSourceModal,
     loadExternalSources,
     handleRemoteImportDone,

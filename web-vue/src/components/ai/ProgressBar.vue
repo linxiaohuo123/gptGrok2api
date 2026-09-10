@@ -40,6 +40,5 @@ const normalizedValue = computed(() => {
   height: 100%;
   border-radius: inherit;
   background: hsl(var(--primary));
-  transition: width 180ms ease;
 }
 </style>

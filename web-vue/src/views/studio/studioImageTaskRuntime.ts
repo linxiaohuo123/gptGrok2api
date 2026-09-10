@@ -1,7 +1,6 @@
-import { computed, ref, watch, type ComputedRef } from 'vue'
+import { computed, ref, type ComputedRef } from 'vue'
 import {
   imageTasksApi,
-  taskPrimaryMessage,
   type ImageTask,
 } from '@/api/imageTasks'
 import type { PageRuntime } from '@/composables/usePageRuntime'
@@ -13,6 +12,7 @@ import type {
 import { getJsonPreference, preferenceKeys, setJsonPreference } from '@/lib/preferences'
 import { isStudioImageMessageRunning, type StudioConversationLookup, type StudioConversationRuntimeIndex } from './studioConversationState'
 import { cleanStudioText } from './studioSearchView'
+import { useStudioTaskPollingCoordinator } from './studioTaskPollingCoordinator'
 
 const IMAGE_POLL_TIMER_KEY = 'studio:image-poll'
 const IMAGE_REFRESH_TIMER_KEY = 'studio:image-refresh'
@@ -37,7 +37,6 @@ export type StudioImageTaskRuntimeInput = {
 
 export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
   const imageTasks = ref<ImageTask[]>([])
-  const isFetchingTasks = ref(false)
   const taskById = computed(() => new Map(imageTasks.value.map((task) => [task.id, task])))
   const activeImageTaskIds = computed(() => {
     const ids = input.activeConversation.value?.messages
@@ -83,10 +82,6 @@ export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
     return badges
   })
 
-  let imageRefreshQueued = false
-  let imageRefreshQueuedForce = false
-  let lastSuccessfulImageRefreshSignature = ''
-
   function storedImageTaskIds() {
     const ids = getJsonPreference<unknown[]>(preferenceKeys.imageTaskLocalIds, [])
     return Array.isArray(ids) ? ids.map((id) => cleanStudioText(id)).filter(Boolean) : []
@@ -98,65 +93,16 @@ export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
     setJsonPreference(preferenceKeys.imageTaskLocalIds, ids)
   }
 
-  async function refresh(force = false) {
-    if (!input.pageRuntime.canRun.value) return
-    if (isFetchingTasks.value) {
-      imageRefreshQueued = true
-      imageRefreshQueuedForce = imageRefreshQueuedForce || force
-      return
-    }
-
-    const requestSeq = input.pageRuntime.nextRequest(IMAGE_TASKS_REQUEST_KEY)
-    const ids = requestedImageTaskIds.value
-    const signature = ids.join('\u0000')
-    if (!force && signature && signature === lastSuccessfulImageRefreshSignature) return
-    if (!ids.length) {
-      imageTasks.value = []
-      lastSuccessfulImageRefreshSignature = ''
-      return
-    }
-
-    isFetchingTasks.value = true
-    try {
-      const response = await imageTasksApi.list(ids)
-      if (!input.pageRuntime.isLatestRequest(IMAGE_TASKS_REQUEST_KEY, requestSeq)) return
-      merge(response.items)
-      markMissing(response.missing_ids)
-      syncMessageStatuses()
-      input.hooks.onRefreshSuccess?.()
-      lastSuccessfulImageRefreshSignature = signature
-    } catch (error) {
-      if (!input.pageRuntime.isLatestRequest(IMAGE_TASKS_REQUEST_KEY, requestSeq)) return
-      input.hooks.onRefreshError(input.hooks.formatError(error, '刷新图片任务失败'))
-      lastSuccessfulImageRefreshSignature = ''
-    } finally {
-      if (!input.pageRuntime.isLatestRequest(IMAGE_TASKS_REQUEST_KEY, requestSeq)) return
-      isFetchingTasks.value = false
-      schedulePoll()
-      if (imageRefreshQueued) {
-        const queuedForce = imageRefreshQueuedForce
-        imageRefreshQueued = false
-        imageRefreshQueuedForce = false
-        scheduleRefresh(0, queuedForce)
-      }
-    }
-  }
-
-  function merge(items: ImageTask[]) {
+  function mergeTaskItems(items: ImageTask[]) {
     const map = new Map(imageTasks.value.map((task) => [task.id, task]))
     items.filter((task) => task.id).forEach((task) => map.set(task.id, task))
     imageTasks.value = Array.from(map.values())
-    lastSuccessfulImageRefreshSignature = ''
-  }
-
-  function reset() {
-    imageTasks.value = []
-    lastSuccessfulImageRefreshSignature = ''
   }
 
   function markMissing(taskIds: string[]) {
     const missing = new Set(taskIds.filter(Boolean))
     if (!missing.size) return
+    imageTasks.value = imageTasks.value.filter((task) => !missing.has(task.id) || task.terminal)
     const changedConversations = new Set<StudioConversation>()
     input.conversationRuntimeIndex.value.imageTaskMessageEntries.forEach(({ conversation, message }) => {
       if (!message.taskId || !missing.has(message.taskId)) return
@@ -176,58 +122,73 @@ export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
       const task = taskById.value.get(message.taskId)
       if (!task) return
       const previousStatus = message.status
-      if (task.status === 'success') {
-        message.status = 'done'
-        if (previousStatus !== 'done') input.hooks.markConversationNotice(conversation.id, 'done')
-      } else if (task.status === 'error') {
-        message.status = 'error'
-        message.error = taskPrimaryMessage(task) || task.error || '图片任务失败'
-        if (previousStatus !== 'error') input.hooks.markConversationNotice(conversation.id, 'error')
-      } else {
+      if (!task.terminal) {
         message.status = 'running'
+        message.error = undefined
+      } else if (task.status === 'success' || task.status === 'partial_success' || task.status === 'text_review') {
+        message.status = 'done'
+        message.error = undefined
+        if (previousStatus !== 'done') input.hooks.markConversationNotice(conversation.id, 'done')
+      } else {
+        message.status = 'error'
+        message.error = task.public_error
+        if (previousStatus !== 'error') input.hooks.markConversationNotice(conversation.id, 'error')
       }
       if (message.status !== previousStatus) changedConversations.add(conversation)
     })
     changedConversations.forEach(input.hooks.touchConversation)
   }
 
-  function schedulePoll() {
-    input.pageRuntime.clearTimer(IMAGE_POLL_TIMER_KEY)
-    if (!input.pageRuntime.canRun.value) return
-    if (!pendingImageTaskIds.value.length) return
-    input.pageRuntime.setTimer(IMAGE_POLL_TIMER_KEY, 4000, () => {
-      void refresh(true)
-    })
+  const taskPollingCoordinator = useStudioTaskPollingCoordinator({
+    pageRuntime: input.pageRuntime,
+    requestedTaskIds: requestedImageTaskIds,
+    pendingTaskIds: pendingImageTaskIds,
+    requestKey: IMAGE_TASKS_REQUEST_KEY,
+    pollTimerKey: IMAGE_POLL_TIMER_KEY,
+    refreshTimerKey: IMAGE_REFRESH_TIMER_KEY,
+    loadTasks: imageTasksApi.list,
+    applyResponse: (response) => {
+      mergeTaskItems(response.items)
+      markMissing(response.missing_ids)
+      syncMessageStatuses()
+    },
+    clearTasks: () => {
+      imageTasks.value = []
+    },
+    onRefreshSuccess: input.hooks.onRefreshSuccess,
+    onRefreshError: (error) => {
+      input.hooks.onRefreshError(input.hooks.formatError(error, '刷新图片任务失败'))
+    },
+  })
+
+  function merge(items: ImageTask[]) {
+    mergeTaskItems(items)
+    taskPollingCoordinator.invalidateRefreshSignature()
   }
 
-  function scheduleRefresh(delay = 120, force = false) {
-    if (!input.pageRuntime.canRun.value) return
-    input.pageRuntime.setTimer(IMAGE_REFRESH_TIMER_KEY, delay, () => {
-      void refresh(force)
-    })
+  async function resumePoll(taskId: string) {
+    const normalizedTaskId = cleanStudioText(taskId)
+    if (!normalizedTaskId) return null
+    try {
+      const task = await imageTasksApi.resumePoll(normalizedTaskId)
+      merge([task])
+      syncMessageStatuses()
+      taskPollingCoordinator.schedulePoll()
+      return task
+    } catch (error) {
+      input.hooks.onRefreshError(input.hooks.formatError(error, '继续图片任务失败'))
+      return null
+    }
   }
 
-  function deactivate() {
-    input.pageRuntime.invalidateRequest(IMAGE_TASKS_REQUEST_KEY)
-    isFetchingTasks.value = false
-    imageRefreshQueued = false
-    imageRefreshQueuedForce = false
-    input.pageRuntime.clearTimer(IMAGE_POLL_TIMER_KEY)
-    input.pageRuntime.clearTimer(IMAGE_REFRESH_TIMER_KEY)
-  }
-
-  const stopRequestedImageTaskWatch = watch(requestedImageTaskIds, () => scheduleRefresh())
-  const stopPendingImageTaskWatch = watch(pendingImageTaskIds, schedulePoll)
-
-  function dispose() {
-    deactivate()
-    stopRequestedImageTaskWatch()
-    stopPendingImageTaskWatch()
+  function reset() {
+    imageTasks.value = []
+    taskPollingCoordinator.invalidateRefreshSignature()
   }
 
   return {
     imageTasks,
-    isFetchingTasks,
+    isFetchingTasks: taskPollingCoordinator.isFetchingTasks,
     taskById,
     activeImageTaskIds,
     pendingImageTaskIds,
@@ -235,12 +196,13 @@ export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
     activeRunningTaskCount,
     conversationBadges,
     rememberTask,
-    refresh,
+    resumePoll,
+    refresh: taskPollingCoordinator.refresh,
     merge,
     reset,
-    schedulePoll,
-    scheduleRefresh,
-    deactivate,
-    dispose,
+    schedulePoll: taskPollingCoordinator.schedulePoll,
+    scheduleRefresh: taskPollingCoordinator.scheduleRefresh,
+    deactivate: taskPollingCoordinator.deactivate,
+    dispose: taskPollingCoordinator.dispose,
   }
 }

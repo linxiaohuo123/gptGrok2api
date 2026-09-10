@@ -1,8 +1,11 @@
+// [INPUT]: 仅标准库（encoding/json、strings）
+// [OUTPUT]: 协议转换：ResponsesInputMessages、ExtractMessage、contentText、UpstreamError
+// [POS]: 四套输入形态归一为内部 Message；contentText 只认带字符串 text 字段的内容块。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package protocol
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -39,13 +42,6 @@ type ResponsesRequest struct {
 	ToolChoice      any              `json:"tool_choice"`
 }
 
-type UpstreamEvent struct {
-	Text          string
-	Thinking      string
-	SoftStop      bool
-	UpstreamError *UpstreamError
-}
-
 type UpstreamError struct {
 	Status  int
 	Message string
@@ -56,6 +52,43 @@ func (e *UpstreamError) Error() string {
 	return e.Message
 }
 
+func ResponsesInputMessages(input any, instructions string) []Message {
+	messages := make([]Message, 0, 2)
+	if text := strings.TrimSpace(instructions); text != "" {
+		messages = append(messages, Message{Role: "system", Content: text})
+	}
+	switch value := input.(type) {
+	case string:
+		if text := strings.TrimSpace(value); text != "" {
+			messages = append(messages, Message{Role: "user", Content: text})
+		}
+	case []any:
+		for _, raw := range value {
+			object, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			role := strings.TrimSpace(fmt.Sprint(object["role"]))
+			if role == "" || role == "<nil>" {
+				role = "user"
+			}
+			content := object["content"]
+			if contentText(content) != "" {
+				messages = append(messages, Message{Role: role, Content: content})
+			}
+		}
+	case map[string]any:
+		role := strings.TrimSpace(fmt.Sprint(value["role"]))
+		if role == "" || role == "<nil>" {
+			role = "user"
+		}
+		if content := value["content"]; contentText(content) != "" {
+			messages = append(messages, Message{Role: role, Content: content})
+		}
+	}
+	return messages
+}
+
 func ExtractMessage(messages []Message) string {
 	parts := make([]string, 0, len(messages))
 	for _, message := range messages {
@@ -64,128 +97,11 @@ func ExtractMessage(messages []Message) string {
 			role = "user"
 		}
 		text := contentText(message.Content)
-		if text == "" {
-			continue
+		if text != "" {
+			parts = append(parts, fmt.Sprintf("[%s]: %s", role, text))
 		}
-		parts = append(parts, fmt.Sprintf("[%s]: %s", role, text))
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-func BuildGrokPayload(message, mode string, temperature *float64, topP *float64, maxTokens *int) map[string]any {
-	payload := map[string]any{
-		"collectionIds": []any{},
-		"connectors":    []any{},
-		"deviceEnvInfo": map[string]any{
-			"darkModeEnabled":  false,
-			"devicePixelRatio": 2,
-			"screenHeight":     1329,
-			"screenWidth":      2056,
-			"viewportHeight":   1083,
-			"viewportWidth":    2056,
-		},
-		"disableMemory":               true,
-		"disableSearch":               false,
-		"disableSelfHarmShortCircuit": false,
-		"disableTextFollowUps":        false,
-		"enableImageGeneration":       true,
-		"enableImageStreaming":        true,
-		"enableSideBySide":            true,
-		"fileAttachments":             []any{},
-		"forceConcise":                false,
-		"forceSideBySide":             false,
-		"imageAttachments":            []any{},
-		"imageGenerationCount":        2,
-		"isAsyncChat":                 false,
-		"message":                     message,
-		"modeId":                      mode,
-		"responseMetadata":            map[string]any{},
-		"returnImageBytes":            false,
-		"returnRawGrokInXaiRequest":   false,
-		"searchAllConnectors":         false,
-		"sendFinalMetadata":           true,
-		"temporary":                   true,
-		"toolOverrides": map[string]any{
-			"gmailSearch":           false,
-			"googleCalendarSearch":  false,
-			"outlookSearch":         false,
-			"outlookCalendarSearch": false,
-			"googleDriveSearch":     false,
-		},
-	}
-	override := map[string]any{}
-	if temperature != nil {
-		override["temperature"] = *temperature
-	}
-	if topP != nil {
-		override["topP"] = *topP
-	}
-	if maxTokens != nil {
-		override["maxTokens"] = *maxTokens
-	}
-	if len(override) > 0 {
-		payload["responseMetadata"].(map[string]any)["modelConfigOverride"] = override
-	}
-	return payload
-}
-
-func ParseUpstreamLine(line string) ([]UpstreamEvent, error) {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "event:") {
-		return nil, nil
-	}
-	if strings.HasPrefix(line, "data:") {
-		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-	}
-	if line == "[DONE]" {
-		return []UpstreamEvent{{SoftStop: true}}, nil
-	}
-	if !strings.HasPrefix(line, "{") {
-		return nil, nil
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(line), &envelope); err != nil {
-		return nil, nil
-	}
-	if rawError, ok := envelope["error"].(map[string]any); ok {
-		message := firstString(rawError, "message", "error")
-		status := 502
-		code := fmt.Sprint(rawError["code"])
-		lower := strings.ToLower(message)
-		if code == "8" || strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many") {
-			status = 429
-		}
-		return nil, &UpstreamError{Status: status, Message: message, Body: line}
-	}
-	result, _ := envelope["result"].(map[string]any)
-	response, _ := result["response"].(map[string]any)
-	event := UpstreamEvent{}
-	if token, ok := response["token"].(string); ok {
-		if response["isThinking"] == true {
-			event.Thinking = token
-		} else if response["messageTag"] == "final" || response["messageTag"] == nil || response["messageTag"] == "" {
-			event.Text = token
-		}
-	}
-	if response["isSoftStop"] == true || response["finalMetadata"] != nil {
-		event.SoftStop = true
-	}
-	return []UpstreamEvent{event}, nil
-}
-
-func ScanUpstream(body *bufio.Scanner, onEvent func(UpstreamEvent) error) error {
-	for body.Scan() {
-		events, err := ParseUpstreamLine(body.Text())
-		if err != nil {
-			return err
-		}
-		for _, event := range events {
-			if err := onEvent(event); err != nil {
-				return err
-			}
-		}
-	}
-	return body.Err()
 }
 
 func contentText(value any) string {
@@ -195,11 +111,12 @@ func contentText(value any) string {
 	case []any:
 		parts := make([]string, 0, len(typed))
 		for _, raw := range typed {
+			// 只认"带字符串 text 字段"这一件事，不列 type 白名单：
+			// Chat Completions 的 text、Responses API 的 input_text/output_text
+			// 以及后续新增的同类块都自动落进来，不会再被静默丢弃。
 			if object, ok := raw.(map[string]any); ok {
-				if object["type"] == "text" {
-					if text, ok := object["text"].(string); ok {
-						parts = append(parts, strings.TrimSpace(text))
-					}
+				if text, ok := object["text"].(string); ok {
+					parts = append(parts, strings.TrimSpace(text))
 				}
 			}
 		}
@@ -207,15 +124,4 @@ func contentText(value any) string {
 	default:
 		return ""
 	}
-}
-
-func firstString(values map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if value, ok := values[key]; ok && value != nil {
-			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
-				return text
-			}
-		}
-	}
-	return "upstream stream error"
 }

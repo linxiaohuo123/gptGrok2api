@@ -1,3 +1,8 @@
+// [INPUT]: proxy
+// [OUTPUT]: 代理订阅：refreshProxyGroupSubscription、parseProxySubscription
+// [POS]: 外部订阅源拉取 → 解析 → 去重 → 替换节点组；手工节点保留。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (

@@ -1,8 +1,14 @@
+// [INPUT]: proxy
+// [OUTPUT]: 账号级能力：NewOpenAIAccountClient、RefreshAccount、指纹构造、clearance 刷新
+// [POS]: 浏览器指纹与 Cloudflare clearance 缓存。单账号指纹确定性派生与隔离，对齐 Chrome 133 协议栈。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package provider
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,7 +26,7 @@ import (
 
 const (
 	openAIOAuthClientID = "app_2SKx67EdpoN0G6j64fRvigXD"
-	openAIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+	openAIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 	openAIClientVersion = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
 	openAIClientBuild   = "6708908"
 )
@@ -565,16 +571,42 @@ type openAIFingerprint struct {
 	SecCHUAPlatform        string
 }
 
+func deterministicUUID(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	sum[6] = (sum[6] & 0x0f) | 0x40 // RFC 4122 version 4
+	sum[8] = (sum[8] & 0x3f) | 0x80 // RFC 4122 variant 1
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex.EncodeToString(sum[0:4]),
+		hex.EncodeToString(sum[4:6]),
+		hex.EncodeToString(sum[6:8]),
+		hex.EncodeToString(sum[8:10]),
+		hex.EncodeToString(sum[10:16]))
+}
+
+func accountDeviceID(account map[string]any) string {
+	seed := aiString(account, "token", "access_token", "email", "id", "account_id")
+	if seed == "" {
+		return firstUUID()
+	}
+	return deterministicUUID(seed + ":device")
+}
+
+func accountSessionID(account map[string]any) string {
+	seed := aiString(account, "token", "access_token", "email", "id", "account_id")
+	if seed == "" {
+		return firstUUID()
+	}
+	return deterministicUUID(seed + ":session")
+}
+
 func buildOpenAIFingerprint(account map[string]any) openAIFingerprint {
-	// Keep the defaults aligned with the Python curl_cffi client. An imported
-	// account may carry a more precise browser fingerprint under fp.
 	fingerprint := openAIFingerprint{
-		UserAgent:              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-		DeviceID:               firstUUID(),
-		SessionID:              firstUUID(),
-		SecCHUA:                `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
-		SecCHUAFullVersion:     `"143.0.3650.96"`,
-		SecCHUAFullVersionList: `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`,
+		UserAgent:              openAIUserAgent,
+		DeviceID:               accountDeviceID(account),
+		SessionID:              accountSessionID(account),
+		SecCHUA:                `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`,
+		SecCHUAFullVersion:     `"133.0.6943.142"`,
+		SecCHUAFullVersionList: `"Not(A:Brand";v="99.0.0.0", "Google Chrome";v="133.0.6943.142", "Chromium";v="133.0.6943.142"`,
 		SecCHUAMobile:          "?0",
 		SecCHUAPlatform:        `"Windows"`,
 	}

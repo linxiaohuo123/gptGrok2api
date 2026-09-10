@@ -1,39 +1,55 @@
 <template>
   <div
-    v-if="totalCount > 0"
-    class="flex flex-col gap-3 border-t border-border/60 pt-4 md:flex-row md:items-center md:justify-between"
+    v-if="totalCount > 0 || layoutMode"
+    class="flex min-h-[3.25rem] flex-col gap-3 border-t border-border/60 pt-4 md:flex-row md:items-center md:justify-between"
   >
-    <div class="text-xs text-muted-foreground">
-      当前展示 {{ visibleCount }} / {{ totalCount }} {{ unit }}
+    <div v-if="totalCount > 0" class="min-w-0 text-xs text-muted-foreground">
+      <slot
+        name="summary"
+        :visible-count="visibleCount"
+        :total-count="totalCount"
+        :unit="unit"
+      >
+        当前展示 {{ visibleCount }} / {{ totalCount }} {{ unit }}
+      </slot>
     </div>
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="text-xs text-muted-foreground">每页</span>
-      <div class="w-[110px] shrink-0">
-        <GroupedSelectMenu
-          :model-value="String(pageSize)"
-          :groups="pageSizeMenuGroups"
-          :placement="placement"
-          :aria-label="`${unit}每页数量`"
-          @update:model-value="setPageSize"
+    <div class="flex w-full flex-wrap items-center gap-2 md:w-auto">
+      <div class="flex shrink-0 items-center gap-2">
+        <ListLayoutControl
+          v-if="layoutMode"
+          :model-value="layoutMode"
+          @update:model-value="emit('update:layoutMode', $event)"
         />
+        <div v-if="totalCount > 0" class="w-24 shrink-0">
+          <GroupedSelectMenu
+            :model-value="String(pageSize)"
+            :groups="pageSizeMenuGroups"
+            block
+            :placement="placement"
+            :aria-label="`${unit}每页数量`"
+            @update:model-value="setPageSize"
+          />
+        </div>
       </div>
-      <Button
-        size="sm"
-        variant="outline"
-        :disabled="disabled || safePage <= 1"
-        @click="emit('update:page', safePage - 1)"
-      >
-        上一页
-      </Button>
-      <span class="text-sm text-muted-foreground tabular-nums">{{ safePage }} / {{ pageCount }}</span>
-      <Button
-        size="sm"
-        variant="outline"
-        :disabled="disabled || safePage >= pageCount"
-        @click="emit('update:page', safePage + 1)"
-      >
-        下一页
-      </Button>
+      <div v-if="totalCount > 0" class="flex shrink-0 items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          :disabled="disabled || safePage <= 1"
+          @click="emit('update:page', safePage - 1)"
+        >
+          上一页
+        </Button>
+        <span class="text-sm text-muted-foreground tabular-nums">{{ safePage }} / {{ pageCount }}</span>
+        <Button
+          size="sm"
+          variant="outline"
+          :disabled="disabled || safePage >= pageCount"
+          @click="emit('update:page', safePage + 1)"
+        >
+          下一页
+        </Button>
+      </div>
     </div>
   </div>
 </template>
@@ -41,7 +57,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Button } from 'nanocat-ui'
-import GroupedSelectMenu from '../ui/GroupedSelectMenu.vue'
+import { GroupedSelectMenu } from 'nanocat-ui'
+import ListLayoutControl from '@/components/ai/ListLayoutControl.vue'
+import type { ListLayoutMode } from '@/composables/useListLayoutPreference'
 
 type MenuPlacement = 'auto' | 'top' | 'bottom' | 'left' | 'right' | 'up' | 'down'
 
@@ -53,6 +71,7 @@ const props = withDefaults(defineProps<{
   unit?: string
   disabled?: boolean
   placement?: MenuPlacement
+  layoutMode?: ListLayoutMode
 }>(), {
   pageSizeOptions: () => [20, 50, 100],
   unit: '条',
@@ -63,6 +82,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'update:page', value: number): void
   (e: 'update:pageSize', value: number): void
+  (e: 'update:layoutMode', value: ListLayoutMode): void
 }>()
 
 const pageCount = computed(() => Math.max(1, Math.ceil(props.totalCount / Math.max(1, props.pageSize))))

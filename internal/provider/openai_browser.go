@@ -1,3 +1,8 @@
+// [INPUT]: 外部依赖 bogdanfinn/fhttp、tls-client
+// [OUTPUT]: 浏览器指纹传输：browserHTTP.Do、cloneStdHTTPResponse
+// [POS]: 把 fhttp 响应转换成标准库形态，使上层无需区分传输实现。无状态 TLS 客户端，杜绝多账号 Cookie 串号。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package provider
 
 import (
@@ -22,10 +27,9 @@ func newBrowserHTTP(proxyURL string, timeout time.Duration) (*browserHTTP, error
 		seconds = 30
 	}
 	options := []tlsclient.HttpClientOption{
-		tlsclient.WithClientProfile(profiles.Chrome_110),
+		tlsclient.WithClientProfile(profiles.DefaultClientProfile),
 		tlsclient.WithTimeoutSeconds(seconds),
 		tlsclient.WithNotFollowRedirects(),
-		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
 	}
 	if proxyURL != "" {
 		options = append(options, tlsclient.WithProxyUrl(proxyURL))

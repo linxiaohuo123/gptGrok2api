@@ -32,6 +32,7 @@ withDefaults(defineProps<{
 <style scoped>
 .modal-footer {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   padding: 12px 20px;

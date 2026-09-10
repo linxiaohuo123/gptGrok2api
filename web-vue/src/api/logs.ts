@@ -1,43 +1,172 @@
 import apiClient from './client'
-import type { AdminLogGroup, AdminLogStats, AdminLogsResponse, LogEntry } from '@/types/api'
-import { isImageModelId } from '@/config/modelCatalog'
+import { formatRequestDuration } from '@/lib/requestDuration'
+import type {
+  CallPresentationStatus,
+  PresentationTone,
+  RequestDetailPresentation,
+  TimelinePresentation,
+} from './requestDetail'
 
-type LogsListParams = {
-  limit?: number
-  level?: string
-  search?: string
+export type {
+  CallDetailField,
+  CallPresentationStatus,
+  PresentationTone,
+  TimelineCategory,
+  TimelinePresentation,
+  TimelineTone,
+} from './requestDetail'
+
+export type CallBusiness =
+  | 'account'
+  | 'image_generation'
+  | 'image_edit'
+  | 'image_chat'
+  | 'chat'
+  | 'responses'
+  | 'messages'
+  | 'search'
+  | 'file'
+  | 'other'
+
+export type CallOutcome =
+  | 'success'
+  | 'failed'
+  | 'rate_limited'
+  | 'text_review'
+  | 'partial_success'
+  | 'unknown'
+
+export type AttemptResultStatus =
+  | 'success'
+  | 'failed'
+  | 'generated_but_delivery_failed'
+
+export type CallPresentation = {
+  request: {
+    kind: string
+    primary: string
+    secondary: string
+    parameters?: string
+  }
+  execution: {
+    primary: string
+    secondary: string
+  }
+  status: CallPresentationStatus
+  result: {
+    text: string
+    diagnostics: string
+    resolution?: string
+  }
+  summary_text: string
+  duration: {
+    text: string
+    breakdown: string
+    tone: PresentationTone
+  }
+  is_failure: boolean
 }
 
-export type SystemLog = {
-  id?: string
-  time?: string
-  type?: string
-  summary?: string
+export type AttemptPresentation = {
+  status: CallPresentationStatus
+  failure_label: string
+  marker_tone: 'success' | 'danger'
+  switch_label: string
+  error_code_text: string
+  status_code_text: string
+  show_failure: boolean
+  show_error_details: boolean
+  timeline: TimelinePresentation
+}
+
+export type AttemptGroupPresentation = {
+  slot: number
+  slot_label: string
+  attempt_count: number
+  attempt_text: string
+  switch_count: number
+  switch_text: string
+  status: CallPresentationStatus
+}
+
+export type CallDetailPresentation = RequestDetailPresentation & {
+  has_attempt_breakdown: boolean
+  attempt_groups: AttemptGroupPresentation[]
+}
+
+export type AttemptSummary = {
+  slot: number
+  attempt: number
+  account_email: string
+  conversation_id: string
+  status: string
+  outcome: CallOutcome
+  result_status: AttemptResultStatus
+  duration_ms: number
+  status_code: number
+  error_code: string
+  error_label: string
+  public_error: string
+  upstream_error: string
+  upstream_text: string
+  switched_account: boolean | null
+  presentation: AttemptPresentation
+  timings_ms: Record<string, number>
+  monitor: Record<string, unknown>
+}
+
+export type CallSummary = {
+  id: string
+  time: string
+  type: string
+  summary: string
+  business: CallBusiness
+  outcome: CallOutcome
+  display_status: string
+  endpoint: string
+  model: string
+  started_at: string
+  ended_at: string
+  duration_ms: number
+  key_id: string
+  key_name: string
+  role: string
+  account_email: string
+  conversation_id: string
+  status_code: number
+  error_code: string
+  public_error: string
+  image_requested_count: number
+  image_succeeded_count: number
+  image_failed_count: number
+  image_result_status: string
+  preview_image_url: string
+  attempt_count: number
+  switch_count: number
+  recovered_after_switch: boolean
+  presentation: CallPresentation
+}
+
+export type CallDetail = CallSummary & {
+  request_text: string
+  request_text_full: string
+  request_text_truncated: boolean
+  request_shape: Record<string, unknown>
+  request_meta: Record<string, unknown>
+  upstream_error: string
+  upstream_text: string
+  image_urls: string[]
+  attempts: AttemptSummary[]
+  timings_ms: Record<string, number>
+  perf: Record<string, unknown>
+  metrics: Record<string, unknown>
+  monitor: Record<string, unknown>
+  detail_presentation: CallDetailPresentation
+  raw_detail: Record<string, unknown>
+}
+
+export type SystemLog = CallSummary & {
   detail?: Record<string, any>
-}
-
-type BackendLogsResponse = {
-  items?: SystemLog[]
-  total?: number
-  limit?: number
-  offset?: number
-  has_more?: boolean
-  facets_scope?: string
-  stats_scope?: string
-  total_scope?: string
-  facets?: {
-    statuses?: Record<string, number>
-    endpoints?: Record<string, number>
-    models?: Record<string, number>
-    accounts?: Record<string, number>
-  }
-  stats?: {
-    total?: number
-    success?: number
-    failed?: number
-    limited?: number
-    image?: number
-  }
 }
 
 export type SystemLogsListParams = {
@@ -55,7 +184,7 @@ export type SystemLogsListParams = {
 }
 
 export type SystemLogsResponse = {
-  items: SystemLog[]
+  items: CallSummary[]
   total: number
   limit: number
   offset: number
@@ -72,51 +201,22 @@ export type SystemLogsResponse = {
   stats: {
     total: number
     success: number
+    text_review: number
     failed: number
     limited: number
     image: number
   }
 }
 
-export type RuntimeLog = {
-  id?: string
-  time?: string
-  level?: string
-  message?: string
-  source?: string
-  path?: string
-}
-
-type RuntimeLogsResponseRaw = {
-  items?: RuntimeLog[]
-  total?: number
-  limit?: number
-  sources?: {
-    memory?: boolean
-    files?: string[]
-  }
-}
-
-export type RuntimeLogsListParams = {
-  level?: string
-  search?: string
-  source?: string
-  limit?: number
-}
-
-export type RuntimeLogsResponse = {
-  items: RuntimeLog[]
-  total: number
-  limit: number
-  sources: {
-    memory: boolean
-    files: string[]
-  }
-}
-
-export type LogDiagnosisChip = {
-  label: string
-  tone: 'neutral' | 'success' | 'warning' | 'danger' | 'info'
+export type ImageAttempt = {
+  slot: number
+  attempt: number
+  accountEmail: string
+  publicError: string
+  upstreamError: string
+  upstreamText: string
+  presentation: AttemptPresentation
+  durationMs: number
 }
 
 export type SystemLogRow = {
@@ -125,6 +225,8 @@ export type SystemLogRow = {
   time: string
   type: string
   summary: string
+  business: CallBusiness
+  outcome: CallOutcome
   endpoint: string
   model: string
   status: string
@@ -132,42 +234,26 @@ export type SystemLogRow = {
   keyName: string
   role: string
   accountEmail: string
-  accountId: string
   conversationId: string
-  proxySource: string
-  proxyHash: string
-  egressKey: string
-  egressLabel: string
-  proxyGroupId: string
-  proxyNodeId: string
-  proxyNodeName: string
-  imageEgressLimit: string
-  hasProxy: string
-  egressMode: string
   durationMs: string
-  statusCode: string
   startedAt: string
   endedAt: string
   requestText: string
   requestTextFull: string
   requestTextTruncated: boolean
-  requestShape: string
   error: string
-  errorCode: string
-  stage: string
-  reason: string
-  upstreamErrorType: string
-  upstreamRequestId: string
-  canResumePoll: boolean
-  toolInvoked: string
-  upstreamMessageLen: string
-  blocked: string
-  upstreamPreview: string
   rawUpstreamMessage: string
   rawUpstreamError: string
   urls: string[]
   imageUrls: string[]
-  diagnosisChips: LogDiagnosisChip[]
+  imageAttempts: ImageAttempt[]
+  imageRequestedCount: number
+  imageSucceededCount: number
+  imageFailedCount: number
+  attemptCount: number
+  accountSwitchCount: number
+  presentation: CallPresentation
+  detailPresentation: CallDetailPresentation
   preview: string
   rawJson: string
 }
@@ -180,109 +266,15 @@ function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
 
-function formatDetailValue(value: unknown): string {
-  if (value === undefined || value === null || value === '') return ''
-  if (Array.isArray(value)) return value.map(formatDetailValue).filter(Boolean).join(' · ')
-  if (typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined && item !== null && item !== '')
-    if (!entries.length) return ''
-    const primitive = entries.every(([, item]) => !item || ['string', 'number', 'boolean'].includes(typeof item))
-    if (primitive && entries.length <= 8) {
-      return entries.map(([key, item]) => `${key}: ${formatDetailValue(item)}`).join(' · ')
-    }
-    try {
-      return JSON.stringify(value, null, 2)
-    } catch {
-      return String(value)
-    }
-  }
-  return String(value).trim()
-}
-
-function normalizeLevel(item: SystemLog): LogEntry['level'] {
-  const detail = item.detail || {}
-  const status = cleanString(detail.status).toLowerCase()
-  const error = cleanString(detail.error)
-  const errorCode = cleanString(detail.error_code || detail?.diagnosis?.error_code)
-  if (status === 'failed' || error || errorCode) return 'ERROR'
-  if (status === 'warning' || status === 'limited') return 'WARNING'
-  return 'INFO'
-}
-
-const LOG_IMAGE_URL_RE = /!\[[^\]]*\]\(((?:https?:\/\/|\/images\/|\/image-thumbnails\/|\/v1\/files\/image(?:\?|\/)|\/upimg\/v1\/files\/image(?:\?|\/))[^\s)"']+)\)/g
-
-function isImageChatLog(endpoint: string, model: string): boolean {
-  return endpoint.includes('/v1/chat') && isImageModelId(model)
-}
-
-function isImageEndpointLog(endpoint: string, model = ''): boolean {
-  return endpoint.includes('/images/') || isImageChatLog(endpoint, model)
-}
-
-function pickEndpointTag(endpoint: string, model = ''): string {
-  if (endpoint.includes('/images/edits')) return 'IMAGE-EDIT'
-  if (endpoint.includes('/images/generations')) return 'IMAGE-GEN'
-  if (isImageChatLog(endpoint, model)) return 'IMAGE-CHAT'
-  if (endpoint.includes('/v1/chat')) return 'CHAT'
-  return 'SYSTEM'
-}
-
-function terminalStage(status: string, error: string): string {
-  if (status === 'success') return 'success'
-  if (status === 'failed' || error) return 'failed'
-  return ''
-}
-
-function terminalStatus(status: string, error: string): AdminLogGroup['status'] {
-  if (status === 'success') return 'success'
-  if (status === 'failed' || error) return 'error'
-  return 'in_progress'
-}
-
-function detailValue(detail: Record<string, any>, key: string): string {
-  const value = detail[key]
-  if (value !== undefined && value !== null && value !== '') return formatDetailValue(value)
-  const diagnosis = detail.diagnosis
-  if (diagnosis && typeof diagnosis === 'object') return formatDetailValue(diagnosis[key])
-  return ''
-}
-
-function detailRawValue(detail: Record<string, any>, key: string): unknown {
-  if (Object.prototype.hasOwnProperty.call(detail, key)) return detail[key]
-  const diagnosis = detail.diagnosis
-  if (diagnosis && typeof diagnosis === 'object' && Object.prototype.hasOwnProperty.call(diagnosis, key)) {
-    return diagnosis[key]
-  }
-  return undefined
-}
-
-function collectUrls(value: unknown): string[] {
-  const urls: string[] = []
-  if (Array.isArray(value)) {
-    value.forEach((item) => urls.push(...collectUrls(item)))
-  } else if (value && typeof value === 'object') {
-    Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
-      if (key === 'url' && typeof item === 'string') urls.push(item)
-      else if (key === 'urls' && Array.isArray(item)) urls.push(...item.map((url) => cleanString(url)).filter(Boolean))
-      else urls.push(...collectUrls(item))
-    })
-  } else if (typeof value === 'string') {
-    for (const match of value.matchAll(LOG_IMAGE_URL_RE)) {
-      if (match[1]) urls.push(match[1].replace(/[.,;]+$/, ''))
-    }
-  }
-  return Array.from(new Set(urls))
-}
-
 function normalizePreviewUrl(url: string, apiBaseUrl = ''): string {
   const value = cleanString(url)
   if (!value || value.startsWith('file-service://')) return ''
-  if (value.startsWith('/images/') || value.startsWith('/image-thumbnails/') || value.startsWith('/v1/files/image') || value.startsWith('/upimg/v1/files/image')) return value
+  if (value.startsWith('/images/') || value.startsWith('/image-thumbnails/')) return value
   if (value.startsWith('images/') || value.startsWith('image-thumbnails/')) return `/${value}`
   if (/^https?:\/\//i.test(value)) {
     try {
       const parsed = new URL(value)
-      if (parsed.pathname.startsWith('/images/') || parsed.pathname.startsWith('/image-thumbnails/') || parsed.pathname === '/v1/files/image' || parsed.pathname === '/upimg/v1/files/image') {
+      if (parsed.pathname.startsWith('/images/') || parsed.pathname.startsWith('/image-thumbnails/')) {
         return `${parsed.pathname}${parsed.search}${parsed.hash}`
       }
     } catch {
@@ -312,338 +304,142 @@ export function summarizeLogText(value: string, max = 220): string {
   return `${clean.slice(0, max - 1)}…`
 }
 
-export function formatLogDuration(value: string): string {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed < 0) return ''
-  if (parsed < 1000) return `${Math.round(parsed)}ms`
-  if (parsed < 10000) return `${(parsed / 1000).toFixed(2)}s`
-  return `${(parsed / 1000).toFixed(1)}s`
+export const formatLogDuration = formatRequestDuration
+
+function rawRecord(value: unknown): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : {}
 }
 
-function boolDetailLabel(value: unknown): string {
-  if (value === true || value === 'true') return 'true'
-  if (value === false || value === 'false') return 'false'
-  return cleanString(value)
-}
-
-function buildSystemLogDiagnosisChips(row: {
-  status: string
-  durationMs: string
-  statusCode: string
-  errorCode: string
-  stage: string
-  reason: string
-  requestShape: string
-  imageCount: number
-  canResumePoll: boolean
-  rawUpstreamMessage: string
-  upstreamPreview: string
-  upstreamMessageLen: string
-  toolInvoked: string
-}): LogDiagnosisChip[] {
-  const chips: LogDiagnosisChip[] = []
-  const duration = formatLogDuration(row.durationMs)
-  if (duration) chips.push({ label: `耗时 ${duration}`, tone: 'neutral' })
-  if (row.statusCode) chips.push({ label: `HTTP ${row.statusCode}`, tone: Number(row.statusCode) >= 400 ? 'danger' : 'neutral' })
-  if (row.errorCode) chips.push({ label: `code=${row.errorCode}`, tone: 'warning' })
-  if (row.stage) chips.push({ label: `stage=${row.stage}`, tone: 'info' })
-  if (row.canResumePoll) chips.push({ label: '可继续轮询', tone: 'info' })
-  if (row.rawUpstreamMessage || row.upstreamPreview || row.upstreamMessageLen) {
-    chips.push({ label: row.upstreamMessageLen ? `上游文本 ${row.upstreamMessageLen}` : '上游文本', tone: 'warning' })
-  }
-  if (row.toolInvoked) chips.push({ label: `tool=${row.toolInvoked}`, tone: row.toolInvoked === 'false' ? 'warning' : 'neutral' })
-  if (row.requestShape) chips.push({ label: `shape=${row.requestShape}`, tone: 'neutral' })
-  if (row.imageCount) chips.push({ label: `图片 ${row.imageCount}`, tone: 'success' })
-  if (chips.length === 0 && row.status.toLowerCase() === 'success') {
-    chips.push({ label: '正常', tone: 'success' })
-  }
-  if (chips.length === 0 && row.reason) {
-    chips.push({ label: summarizeLogText(row.reason, 28), tone: 'warning' })
-  }
-  return chips.slice(0, 5)
-}
-
-export function normalizeSystemLogRow(item: SystemLog, index: number, options: NormalizeSystemLogRowOptions = {}): SystemLogRow {
-  const detail = item.detail || {}
-  const monitor = detail.monitor && typeof detail.monitor === 'object' ? detail.monitor as Record<string, any> : {}
-  const error = detailValue(detail, 'error')
-  const requestText = detailValue(detail, 'request_text')
-  const requestTextFull = detailValue(detail, 'request_text_full') || requestText
-  const requestTextTruncated = detailRawValue(detail, 'request_text_truncated') === true
-  const rawUpstreamMessage = detailValue(detail, 'raw_upstream_message')
-  const upstreamPreview = detailValue(detail, 'upstream_message_preview')
-  const duplicateDiagnosticValues = [error, rawUpstreamMessage, upstreamPreview].filter(Boolean)
-  const rawUpstreamError = [
-    detailValue(detail, 'upstream_error'),
-    detailValue(detail, 'raw_error'),
-  ].find((value) => value && !duplicateDiagnosticValues.includes(value)) || ''
-  const reason = detailValue(detail, 'reason')
+export function normalizeSystemLogRow(item: CallSummary, index: number, options: NormalizeSystemLogRowOptions = {}): SystemLogRow {
+  const previewImageUrl = cleanString(item.preview_image_url)
+  const imageUrls = normalizePreviewUrls(previewImageUrl ? [previewImageUrl] : [], options.apiBaseUrl)
+  const durationMs = cleanString(item.duration_ms)
   const summary = cleanString(item.summary)
-  const preview = summarizeLogText(requestText || rawUpstreamMessage || upstreamPreview || error || rawUpstreamError || reason || summary)
-  const urls = collectUrls(detail)
-  const imageUrls = normalizePreviewUrls(urls, options.apiBaseUrl)
-  const status = detailValue(detail, 'status')
-  const durationMs = detailValue(detail, 'duration_ms')
-  const statusCode = detailValue(detail, 'status_code')
-  const startedAt = detailValue(detail, 'started_at')
-  const endedAt = detailValue(detail, 'ended_at')
-  const requestShape = detailValue(detail, 'request_shape')
-  const errorCode = detailValue(detail, 'error_code')
-  const stage = detailValue(detail, 'stage')
-  const upstreamErrorType = detailValue(detail, 'upstream_error_type')
-  const upstreamRequestId = detailValue(detail, 'upstream_request_id')
-  const canResumePoll = detail.can_resume_poll === true || detailValue(detail, 'can_resume_poll') === 'true'
-  const toolInvoked = boolDetailLabel(detailRawValue(detail, 'tool_invoked'))
-  const blocked = boolDetailLabel(detailRawValue(detail, 'blocked'))
-  const upstreamMessageLen = detailValue(detail, 'upstream_message_len')
-  const time = startedAt || cleanString(item.time) || endedAt
+  const error = cleanString(item.public_error)
+  const imageRequestedCount = normalizeNonNegativeNumber(item.image_requested_count)
+  const imageSucceededCount = normalizeNonNegativeNumber(item.image_succeeded_count)
+  const imageFailedCount = normalizeNonNegativeNumber(item.image_failed_count)
+  const attemptCount = normalizeNonNegativeNumber(item.attempt_count)
+  const accountSwitchCount = normalizeNonNegativeNumber(item.switch_count)
+  const time = cleanString(item.time)
+  const raw = item as SystemLog
 
   return {
     id: cleanString(item.id) || `log-${index}`,
-    raw: item,
+    raw,
     time,
     type: cleanString(item.type),
     summary,
-    endpoint: detailValue(detail, 'endpoint'),
-    model: detailValue(detail, 'model'),
-    status,
-    keyId: detailValue(detail, 'key_id'),
-    keyName: detailValue(detail, 'key_name'),
-    role: detailValue(detail, 'role'),
-    accountEmail: detailValue(detail, 'account_email') || detailValue(monitor, 'account_email'),
-    accountId: detailValue(detail, 'provider_account_id') || detailValue(detail, 'account_id') || detailValue(monitor, 'account_id'),
-    conversationId: detailValue(detail, 'conversation_id'),
-    proxySource: detailValue(detail, 'proxy_source') || formatDetailValue(monitor.proxy_source),
-    proxyHash: detailValue(detail, 'proxy_hash') || formatDetailValue(monitor.proxy_hash),
-    egressKey: detailValue(detail, 'egress_key') || formatDetailValue(monitor.egress_key),
-    egressLabel: detailValue(detail, 'egress_label') || formatDetailValue(monitor.egress_label),
-    proxyGroupId: detailValue(detail, 'proxy_group_id') || formatDetailValue(monitor.proxy_group_id),
-    proxyNodeId: detailValue(detail, 'proxy_node_id') || formatDetailValue(monitor.proxy_node_id),
-    proxyNodeName: detailValue(detail, 'proxy_node_name') || formatDetailValue(monitor.proxy_node_name),
-    imageEgressLimit: detailValue(detail, 'image_egress_limit') || formatDetailValue(monitor.image_egress_limit),
-    hasProxy: detailValue(detail, 'has_proxy') || boolDetailLabel(monitor.has_proxy),
-    egressMode: detailValue(detail, 'egress_mode') || formatDetailValue(monitor.egress_mode),
+    business: item.business,
+    outcome: item.outcome,
+    endpoint: cleanString(item.endpoint),
+    model: cleanString(item.model),
+    status: cleanString(item.display_status),
+    keyId: cleanString(item.key_id),
+    keyName: cleanString(item.key_name),
+    role: cleanString(item.role),
+    accountEmail: cleanString(item.account_email),
+    conversationId: cleanString(item.conversation_id),
     durationMs,
-    statusCode,
-    startedAt,
-    endedAt,
-    requestText,
-    requestTextFull,
-    requestTextTruncated,
-    requestShape,
+    startedAt: cleanString(item.started_at),
+    endedAt: cleanString(item.ended_at),
+    requestText: '',
+    requestTextFull: '',
+    requestTextTruncated: false,
     error,
-    errorCode,
-    stage,
-    reason,
-    upstreamErrorType,
-    upstreamRequestId,
-    canResumePoll,
-    toolInvoked,
-    upstreamMessageLen,
-    blocked,
-    upstreamPreview,
-    rawUpstreamMessage,
-    rawUpstreamError,
-    urls,
+    rawUpstreamMessage: '',
+    rawUpstreamError: '',
+    urls: previewImageUrl ? [previewImageUrl] : [],
     imageUrls,
-    diagnosisChips: buildSystemLogDiagnosisChips({
-      status,
-      durationMs,
-      statusCode,
-      errorCode,
-      stage,
-      reason,
-      requestShape,
-      imageCount: imageUrls.length,
-      canResumePoll,
-      rawUpstreamMessage,
-      upstreamPreview,
-      upstreamMessageLen,
-      toolInvoked,
-    }),
-    preview,
-    rawJson: prettyJson(detail),
+    imageAttempts: [],
+    imageRequestedCount,
+    imageSucceededCount,
+    imageFailedCount,
+    attemptCount,
+    accountSwitchCount,
+    presentation: item.presentation,
+    detailPresentation: emptyDetailPresentation(),
+    preview: summarizeLogText(summary || error),
+    rawJson: '',
   }
 }
 
-export function isSystemLogFailed(item: SystemLogRow): boolean {
-  return item.status.toLowerCase() === 'failed' || Boolean(item.error || item.errorCode)
-}
-
-export function isSystemLogSuccess(item: SystemLogRow): boolean {
-  return item.status.toLowerCase() === 'success'
-}
-
-export function isSystemLogLimited(item: SystemLogRow): boolean {
-  const text = [item.status, item.errorCode, item.reason, item.error].join(' ').toLowerCase()
-  return text.includes('limit') || text.includes('quota') || text.includes('受限') || text.includes('限流')
-}
-
-function summarizeDetail(detail: Record<string, any>) {
-  const parts = [
-    detailValue(detail, 'stage') ? `stage=${detailValue(detail, 'stage')}` : '',
-    detailValue(detail, 'error_code') ? `error_code=${detailValue(detail, 'error_code')}` : '',
-    detailValue(detail, 'reason') ? `reason=${detailValue(detail, 'reason')}` : '',
-    detailValue(detail, 'conversation_id') ? `conversation=${detailValue(detail, 'conversation_id')}` : '',
-    detailValue(detail, 'duration_ms') ? `duration_ms=${detailValue(detail, 'duration_ms')}` : '',
-    detailValue(detail, 'upstream_message_preview') ? `upstream="${detailValue(detail, 'upstream_message_preview')}"` : '',
-    detailValue(detail, 'raw_upstream_message') ? `raw_upstream="${detailValue(detail, 'raw_upstream_message')}"` : '',
-  ].filter(Boolean)
-  return parts.join(' | ')
-}
-
-function buildMessage(item: SystemLog): string {
-  const detail = item.detail || {}
-  const endpoint = cleanString(detail.endpoint)
-  const model = cleanString(detail.model)
-  const status = cleanString(detail.status)
-  const summary = cleanString(item.summary)
-  const requestText = cleanString(detail.request_text)
-  const error = cleanString(detail.error)
-  const detailSummary = summarizeDetail(detail)
-  const tags = [`[${pickEndpointTag(endpoint, model)}]`]
-  const conversationId = cleanString(detail.conversation_id)
-  if (conversationId) tags.push(`[req_${conversationId.replace(/[^a-z0-9]/gi, '').slice(0, 12)}]`)
-
-  return [
-    tags.join(''),
-    summary || 'log',
-    endpoint ? `endpoint=${endpoint}` : '',
-    model ? `model=${model}` : '',
-    status ? `status=${status}` : '',
-    detailSummary,
-    requestText ? `request: ${requestText}` : '',
-    error ? `error: ${error}` : '',
-  ].filter(Boolean).join(' ')
-}
-
-function mapLog(item: SystemLog, index: number): LogEntry {
-  const detail = item.detail || {}
-  const id = cleanString(item.id) || `log-${index}`
-  const endpoint = cleanString(detail.endpoint)
-  const model = cleanString(detail.model)
-  const status = cleanString(detail.status)
-  const error = cleanString(detail.error)
-  const conversationId = cleanString(detail.conversation_id)
-  const reqId = conversationId || id
-  const message = buildMessage(item)
+export function normalizeSystemLogDetail(item: CallDetail, options: NormalizeSystemLogRowOptions = {}): SystemLogRow {
+  const row = normalizeSystemLogRow(item, 0, options)
+  const rawDetail = rawRecord(item.raw_detail)
+  const attempts = normalizeImageAttempts(item.attempts)
+  const sourceUrls = Array.isArray(item.image_urls) ? item.image_urls.map(cleanString).filter(Boolean) : []
+  const imageUrls = normalizePreviewUrls(sourceUrls, options.apiBaseUrl)
+  const detail: Record<string, any> = {
+    ...rawDetail,
+    call_id: item.id,
+    endpoint: item.endpoint,
+    model: item.model,
+    status: item.display_status || item.outcome,
+    key_id: item.key_id,
+    key_name: item.key_name,
+    role: item.role,
+    account_email: item.account_email,
+    conversation_id: item.conversation_id,
+    started_at: item.started_at,
+    ended_at: item.ended_at,
+    duration_ms: item.duration_ms,
+    status_code: item.status_code,
+    error_code: item.error_code,
+    public_error: item.public_error,
+    error: item.public_error,
+    request_text: item.request_text,
+    request_text_full: item.request_text_full,
+    request_text_truncated: item.request_text_truncated,
+    request_shape: item.request_shape,
+    request_meta: item.request_meta,
+    upstream_error: item.upstream_error,
+    raw_upstream_message: item.upstream_text,
+    image_urls: sourceUrls,
+    image_attempts: item.attempts,
+    image_requested_count: item.image_requested_count,
+    image_succeeded_count: item.image_succeeded_count,
+    image_failed_count: item.image_failed_count,
+    image_result_status: item.image_result_status,
+    timings_ms: item.timings_ms,
+    perf: item.perf,
+    metrics: item.metrics,
+    monitor: item.monitor,
+  }
   return {
-    time: cleanString(item.time),
-    level: normalizeLevel(item),
-    message,
-    row_id: id,
-    req_id: reqId,
-    tags: [pickEndpointTag(endpoint, model), cleanString(item.type).toUpperCase()].filter(Boolean),
-    account_id: cleanString(detail.account_email || detail.key_name || detail.key_id),
-    text: message,
-    layer: endpoint ? 'reverse' : 'system',
-    lane: '',
-    model,
-    kind: detailValue(detail, 'error_code') || (error ? 'upstream_error' : ''),
-    stage: terminalStage(status, error),
-    served_label: '',
+    ...row,
+    raw: { ...item, detail },
+    requestText: cleanString(item.request_text),
+    requestTextFull: cleanString(item.request_text_full) || cleanString(item.request_text),
+    requestTextTruncated: item.request_text_truncated === true,
+    rawUpstreamMessage: cleanString(item.upstream_text),
+    rawUpstreamError: cleanString(item.upstream_error),
+    urls: sourceUrls,
+    imageUrls,
+    imageAttempts: attempts,
+    detailPresentation: item.detail_presentation,
+    rawJson: prettyJson(rawDetail),
   }
 }
 
-function applyLocalFilters(logs: LogEntry[], params?: LogsListParams) {
-  const level = cleanString(params?.level).toUpperCase()
-  const search = cleanString(params?.search).toLowerCase()
-  const limit = Math.min(Math.max(Number(params?.limit || 300), 10), 1000)
-  const filtered = logs.filter((log) => {
-    if (level && log.level !== level) return false
-    if (!search) return true
-    return [
-      log.message,
-      log.model,
-      log.kind,
-      log.account_id,
-      log.req_id,
-    ].some((value) => cleanString(value).toLowerCase().includes(search))
-  })
-  return filtered.slice(0, limit)
-}
-
-function buildStats(logs: LogEntry[]): AdminLogStats {
-  const byLevel: Record<string, number> = {}
-  logs.forEach((log) => {
-    byLevel[log.level] = (byLevel[log.level] || 0) + 1
-  })
-  const recentErrors = logs.filter((log) => log.level === 'ERROR' || log.level === 'CRITICAL').slice(0, 10)
+function emptyDetailPresentation(): CallDetailPresentation {
   return {
-    memory: {
-      total: logs.length,
-      by_level: byLevel,
-      capacity: 1000,
-    },
-    active: {
-      source: 'file',
-      total: logs.length,
-    },
-    errors: {
-      count: recentErrors.length,
-      recent: recentErrors,
-    },
-    chat_count: logs.filter((log) => log.tags?.includes('CHAT')).length,
+    primary_fields: [],
+    diagnostic_fields: [],
+    has_attempt_breakdown: false,
+    auto_expand_timeline: false,
+    attempt_groups: [],
+    timeline: emptyTimelinePresentation(),
   }
 }
 
-function buildGroups(logs: LogEntry[], rawItems: SystemLog[]): AdminLogGroup[] {
-  const itemById = new Map(rawItems.map((item, index) => [cleanString(item.id) || `log-${index}`, item]))
-  const grouped = new Map<string, { logs: LogEntry[]; raws: SystemLog[] }>()
-  logs.forEach((log) => {
-    const groupId = cleanString(log.req_id || log.row_id)
-    const bucket = grouped.get(groupId) || { logs: [], raws: [] }
-    bucket.logs.push(log)
-    bucket.raws.push(itemById.get(cleanString(log.row_id)) || {})
-    grouped.set(groupId, bucket)
-  })
-
-  return Array.from(grouped.entries()).map(([groupId, bucket]) => {
-    const firstLog = bucket.logs[0]
-    const lastLog = bucket.logs[bucket.logs.length - 1]
-    const terminalRaw = [...bucket.raws].reverse().find((raw) => {
-      const detail = raw.detail || {}
-      return cleanString(detail.status) || cleanString(detail.error)
-    }) || bucket.raws[bucket.raws.length - 1] || {}
-    const firstRaw = bucket.raws[0] || {}
-    const raw = terminalRaw
-    const firstDetail = firstRaw.detail || {}
-    const detail = raw.detail || {}
-    const status = cleanString(detail.status)
-    const error = cleanString(detail.error)
-    return {
-      id: groupId,
-      row_ids: bucket.logs.map((log) => cleanString(log.row_id)).filter(Boolean),
-      status: terminalStatus(status, error),
-      account_id: cleanString(firstLog.account_id || lastLog.account_id),
-      model: cleanString(firstLog.model || lastLog.model),
-      lane: cleanString(firstLog.lane || lastLog.lane),
-      terminal_kind: cleanString(lastLog.kind || firstLog.kind),
-      started_at: detailValue(firstDetail, 'started_at') || cleanString(firstRaw.time),
-      ended_at: detailValue(detail, 'ended_at') || cleanString(raw.time),
-      user_preview: cleanString(firstDetail.request_text || detail.request_text).slice(0, 140),
-      assistant_preview: cleanString(detail.error || detail.upstream_message_preview || detail.raw_upstream_message).slice(0, 140),
-      count: bucket.logs.length,
-    }
-  })
-}
-
-function mapResponse(response: BackendLogsResponse, params?: LogsListParams): AdminLogsResponse {
-  const rawItems = response.items || []
-  const allLogs = rawItems.map(mapLog)
-  const logs = applyLocalFilters(allLogs, params)
+function emptyTimelinePresentation(): TimelinePresentation {
   return {
-    total: logs.length,
-    limit: Math.min(Math.max(Number(params?.limit || 300), 10), 1000),
-    logs,
-    groups: buildGroups(logs, rawItems),
-    filters: {
-      level: params?.level || null,
-      search: params?.search || null,
-      start_time: null,
-      end_time: null,
-    },
-    stats: buildStats(logs),
+    segments: [],
+    legend_items: [],
+    groups: [],
   }
 }
 
@@ -665,110 +461,35 @@ function normalizeSystemParams(params?: SystemLogsListParams) {
   }
 }
 
-function buildSystemStatsFallback(items: SystemLog[]) {
-  const isSuccess = (item: SystemLog) => cleanString(detailValue(item.detail || {}, 'status')).toLowerCase() === 'success'
-  const isFailed = (item: SystemLog) => {
-    const detail = item.detail || {}
-    return cleanString(detailValue(detail, 'status')).toLowerCase() === 'failed'
-      || Boolean(detailValue(detail, 'error') || detailValue(detail, 'error_code'))
-  }
-  const isLimited = (item: SystemLog) => {
-    const detail = item.detail || {}
-    return [
-      detailValue(detail, 'status'),
-      detailValue(detail, 'error_code'),
-      detailValue(detail, 'reason'),
-      detailValue(detail, 'error'),
-    ].join(' ').toLowerCase().includes('limit')
-  }
-  return {
-    total: items.length,
-    success: items.filter(isSuccess).length,
-    failed: items.filter(isFailed).length,
-    limited: items.filter(isLimited).length,
-    image: items.filter((item) => {
-      const detail = item.detail || {}
-      return isImageEndpointLog(detailValue(detail, 'endpoint'), detailValue(detail, 'model'))
-    }).length,
-  }
+function normalizeNonNegativeNumber(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : 0
 }
 
-function normalizeSystemResponse(response: BackendLogsResponse): SystemLogsResponse {
-  const items = response.items || []
-  const facets = response.facets || {}
-  const stats = response.stats || {}
-  const fallbackStats = buildSystemStatsFallback(items)
-  const total = response.total === undefined ? items.length : Number(response.total || 0)
-  return {
-    items,
-    total,
-    limit: Number(response.limit || items.length || 0),
-    offset: Number(response.offset || 0),
-    has_more: response.has_more === true,
-    facets_scope: cleanString(response.facets_scope),
-    stats_scope: cleanString(response.stats_scope),
-    total_scope: cleanString(response.total_scope),
-    facets: {
-      statuses: facets.statuses || {},
-      endpoints: facets.endpoints || {},
-      models: facets.models || {},
-      accounts: facets.accounts || {},
-    },
-    stats: {
-      total: Number(stats.total ?? total),
-      success: Number(stats.success ?? fallbackStats.success),
-      failed: Number(stats.failed ?? fallbackStats.failed),
-      limited: Number(stats.limited ?? fallbackStats.limited),
-      image: Number(stats.image ?? fallbackStats.image),
-    },
-  }
-}
-
-function normalizeRuntimeParams(params?: RuntimeLogsListParams) {
-  const limit = Number(params?.limit || 300)
-  return {
-    level: cleanString(params?.level),
-    search: cleanString(params?.search),
-    source: cleanString(params?.source),
-    limit: Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 2000) : 300,
-  }
-}
-
-function normalizeRuntimeResponse(response: RuntimeLogsResponseRaw): RuntimeLogsResponse {
-  const sources = response.sources || {}
-  return {
-    items: response.items || [],
-    total: Number(response.total || response.items?.length || 0),
-    limit: Number(response.limit || response.items?.length || 0),
-    sources: {
-      memory: sources.memory !== false,
-      files: Array.isArray(sources.files) ? sources.files : [],
-    },
-  }
+function normalizeImageAttempts(value: AttemptSummary[]): ImageAttempt[] {
+  return value
+    .map((item) => ({
+      slot: Math.max(1, normalizeNonNegativeNumber(item.slot)),
+      attempt: Math.max(1, normalizeNonNegativeNumber(item.attempt)),
+      accountEmail: cleanString(item.account_email),
+      publicError: cleanString(item.public_error),
+      upstreamError: cleanString(item.upstream_error),
+      upstreamText: cleanString(item.upstream_text),
+      presentation: item.presentation,
+      durationMs: normalizeNonNegativeNumber(item.duration_ms),
+    }))
+    .sort((left, right) => left.slot - right.slot || left.attempt - right.attempt)
 }
 
 export const logsApi = {
-  list: async (params?: LogsListParams) => {
-    const limit = Math.min(Math.max(Number(params?.limit || 500), 10), 20000)
-    const response = await apiClient.get<never, BackendLogsResponse>('/api/logs', {
-      params: { limit },
-    })
-    return mapResponse(response, params)
-  },
-
   listSystem: async (params?: SystemLogsListParams) => {
-    const response = await apiClient.get<never, BackendLogsResponse>('/api/logs', {
+    return apiClient.get<never, SystemLogsResponse>('/api/logs', {
       params: normalizeSystemParams(params),
     })
-    return normalizeSystemResponse(response)
   },
 
-  listRuntime: async (params?: RuntimeLogsListParams) => {
-    const response = await apiClient.get<never, RuntimeLogsResponseRaw>('/api/runtime-logs', {
-      params: normalizeRuntimeParams(params),
-    })
-    return normalizeRuntimeResponse(response)
-  },
+  get: async (id: string) =>
+    apiClient.get<never, CallDetail>(`/api/logs/${encodeURIComponent(id)}`),
 
   delete: async (ids: string[]) =>
     apiClient.post<{ ids: string[] }, { removed: number }>('/api/logs/delete', { ids }),

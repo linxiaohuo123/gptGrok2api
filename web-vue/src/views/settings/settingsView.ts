@@ -1,13 +1,7 @@
-import { prepareSettingsForSave } from '@/api/settings'
 import type { BackupState } from '@/api/settings'
-import type { ProxyRuntimeStatus, Settings } from '@/types/api'
+import type { Settings, SettingsFieldMetadata } from '@/types/api'
 
 export type SettingsSelectOption = {
-  label: string
-  value: string
-}
-
-export type SettingsSummaryItem = {
   label: string
   value: string
 }
@@ -20,44 +14,13 @@ export type SettingsApiDocItem = {
   example: string
 }
 
-export type SettingsImageErrorMessageKey = keyof Settings['image_error_messages']
-
-export type SettingsImageErrorMessageField = {
-  key: SettingsImageErrorMessageKey
-  label: string
-  placeholder: string
-  help?: string
-}
-
-export type SettingsImageErrorMessageGroup = {
-  key: string
-  title: string
-  fields: SettingsImageErrorMessageField[]
-}
-
-export type SettingsBackupIncludeKey =
-  | 'config'
-  | 'register'
-  | 'cpa'
-  | 'sub2api'
-  | 'logs'
-  | 'dashboard_metrics'
-  | 'image_tasks'
-  | 'accounts_snapshot'
-  | 'auth_keys_snapshot'
-  | 'images'
-
-export type SettingsBackupIncludeOption = {
-  value: SettingsBackupIncludeKey
-  label: string
-}
-
 export type NumberSettingOptions = {
   integer?: boolean
-  min?: number
-  max?: number
-  fallback?: number
+  metadata?: () => SettingsFieldMetadata | null | undefined
+  enabled?: () => boolean
 }
+
+export type SettingsFields = Record<string, SettingsFieldMetadata>
 
 const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric',
@@ -69,135 +32,80 @@ const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 
 export const settingsTabs: SettingsSelectOption[] = [
   { value: 'basic', label: '基础配置' },
-  { value: 'image-errors', label: '图片错误' },
   { value: 'storage', label: '图片存储与审核' },
   { value: 'prompts', label: '提示词源' },
   { value: 'backup', label: 'R2 备份' },
   { value: 'keys', label: '用户密钥' },
   { value: 'api-docs', label: '接口接入' },
-  { value: 'canvas', label: '画布入口' },
+  { value: 'canvas', label: '外部服务' },
   { value: 'cpa', label: 'CPA' },
   { value: 'sub2api', label: 'Sub2API' },
 ]
 
-export const imageErrorMessageGroups: SettingsImageErrorMessageGroup[] = [
-  {
-    key: 'account',
-    title: '账号与配置',
-    fields: [
-      {
-        key: 'quota',
-        label: '额度耗尽',
-        placeholder: '图片账号额度已用完，请稍后再试或联系管理员。',
-      },
-      {
-        key: 'no_account',
-        label: '无可用账号',
-        placeholder: '当前图片账号暂不可用，可能是账号池、并发或上游波动，请稍后重试。',
-      },
-      {
-        key: 'local_busy',
-        label: '本地繁忙',
-        placeholder: '当前没有可用的图片账号或账号并发已满，请稍后重试。',
-      },
-      {
-        key: 'unsupported_model',
-        label: '模型不支持',
-        placeholder: '当前模型不支持图片生成，请检查 model 参数。',
-      },
-      {
-        key: 'token_invalid',
-        label: '账号状态异常',
-        placeholder: '图片生成账号状态异常，请稍后重试。',
-      },
-    ],
+const settingsOptionLabels: Record<string, Record<string, string>> = {
+  image_upscale_engine: {
+    sharp_lanczos3: 'Sharp / Lanczos3',
+    pillow_lanczos: 'Pillow / Lanczos',
   },
-  {
-    key: 'upstream',
-    title: '上游链路',
-    fields: [
-      {
-        key: 'poll_timeout',
-        label: '轮询超时',
-        placeholder: '图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。',
-      },
-      {
-        key: 'stream_interrupted',
-        label: '上游断流',
-        placeholder: '图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。',
-      },
-      {
-        key: 'connection_failed',
-        label: '连接失败',
-        placeholder: '连接上游图片服务失败，可能是网络或代理波动，请重试。',
-      },
-      {
-        key: 'connection_timeout',
-        label: '连接超时',
-        placeholder: '连接上游图片服务超时，请稍后重试。',
-      },
-    ],
+  'image_storage.mode': {
+    local: '仅本地',
+    webdav: '仅 WebDAV',
+    both: '本地 + WebDAV',
   },
-  {
-    key: 'result',
-    title: '结果语义',
-    fields: [
-      {
-        key: 'text_reply',
-        label: '返回文本但无图',
-        placeholder: '上游返回了文本说明，未生成图片。请调整提示词或重试。',
-        help: '可使用 {text} 指定上游文本插入位置；不写占位符时会自动追加到下一行。',
-      },
-    ],
+  'backup.include': {
+    image_tasks: '图片任务记录',
+    editable_files: 'PPT / PSD 文件',
+    images: '图片文件目录',
   },
-  {
-    key: 'fallback',
-    title: '兜底',
-    fields: [
-      {
-        key: 'fallback',
-        label: '兜底错误',
-        placeholder: '图片生成请求失败，请稍后重试。',
-      },
-    ],
-  },
-]
+}
 
-export const imageErrorMessageFields: SettingsImageErrorMessageField[] = imageErrorMessageGroups.flatMap(
-  (group) => group.fields,
-)
+export function settingsField(
+  fields: SettingsFields | null | undefined,
+  path: string,
+): SettingsFieldMetadata | null {
+  return fields?.[path] || null
+}
 
-export const logLevelOptions = ['debug', 'info', 'warning', 'error'] as const
+export function settingsFieldReadOnly(
+  fields: SettingsFields | null | undefined,
+  path: string,
+): boolean {
+  return Boolean(settingsField(fields, path)?.read_only)
+}
 
-export const backupIncludeOptions: SettingsBackupIncludeOption[] = [
-  { value: 'config', label: '系统配置' },
-  { value: 'register', label: '注册配置' },
-  { value: 'cpa', label: 'CPA 配置' },
-  { value: 'sub2api', label: 'Sub2API 配置' },
-  { value: 'logs', label: '调度与调用日志' },
-  { value: 'dashboard_metrics', label: '概览统计' },
-  { value: 'image_tasks', label: '图片任务记录' },
-  { value: 'accounts_snapshot', label: '账号快照' },
-  { value: 'auth_keys_snapshot', label: '用户密钥快照' },
-  { value: 'images', label: '图片文件目录' },
-]
+export function settingsFieldOptions(
+  fields: SettingsFields | null | undefined,
+  path: string,
+  currentValue?: unknown,
+): SettingsSelectOption[] {
+  const values = [...(settingsField(fields, path)?.options || [])]
+  const currentValues = Array.isArray(currentValue) ? currentValue : [currentValue]
+  for (const currentValueItem of currentValues) {
+    const current = String(currentValueItem ?? '').trim()
+    if (current && !values.includes(current)) values.unshift(current)
+  }
+  const labels = settingsOptionLabels[path] || {}
+  return Array.from(new Set(values)).map((value) => ({
+    value,
+    label: labels[value] || value,
+  }))
+}
 
-export const imageStorageModeOptions: SettingsSelectOption[] = [
-  { label: '仅本地', value: 'local' },
-  { label: '仅 WebDAV', value: 'webdav' },
-  { label: '本地 + WebDAV', value: 'both' },
-]
-
-export const proxyRuntimeEgressOptions: SettingsSelectOption[] = [
-  { label: '直连', value: 'direct' },
-  { label: '单代理', value: 'single_proxy' },
-]
-
-export const proxyClearanceModeOptions: SettingsSelectOption[] = [
-  { label: '关闭', value: 'none' },
-  { label: 'FlareSolverr', value: 'flaresolverr' },
-  { label: '手动 Cookie', value: 'manual' },
-]
+export function settingsBooleanFieldOptions(
+  fields: SettingsFields | null | undefined,
+  prefix: string,
+  currentValues: Record<string, boolean>,
+): SettingsSelectOption[] {
+  const values = Object.keys(fields || {})
+    .filter((path) => path.startsWith(prefix))
+    .map((path) => path.slice(prefix.length))
+  for (const value of Object.keys(currentValues)) {
+    if (!values.includes(value)) values.push(value)
+  }
+  const labelGroup = prefix.replace(/\.$/, '')
+  const labels = settingsOptionLabels[labelGroup] || {}
+  return values.map((value) => ({ value, label: labels[value] || value }))
+}
 
 export function backupStatusText(state: BackupState | null | undefined) {
   if (!state) return '未加载'
@@ -205,16 +113,6 @@ export function backupStatusText(state: BackupState | null | undefined) {
   if (state.last_status === 'success') return '最近成功'
   if (state.last_status === 'error') return '最近失败'
   return state.last_status || '未执行'
-}
-
-export function buildProxyRuntimeSummaryItems(status: ProxyRuntimeStatus | null | undefined): SettingsSummaryItem[] {
-  return [
-    { label: '运行时', value: status ? (status.enabled ? '已启用' : '关闭') : '-' },
-    { label: '出站方式', value: status ? (status.egress_mode === 'single_proxy' ? '单代理' : '直连') : '-' },
-    { label: '代理', value: status ? (status.has_proxy ? '已配置' : '未配置') : '-' },
-    { label: '清障', value: status ? (status.clearance_enabled ? `已启用 / ${status.clearance_mode}` : '关闭') : '-' },
-    { label: '缓存', value: status ? (status.has_clearance_bundle ? '已有 clearance' : '暂无缓存') : '-' },
-  ]
 }
 
 export function formatBytes(value: unknown) {
@@ -238,79 +136,62 @@ export function formatDateTime(value: unknown) {
   return dateTimeFormatter.format(parsed)
 }
 
-export function normalizeNumberSetting(value: unknown, options: NumberSettingOptions = {}): number {
-  const fallback = options.fallback ?? 0
-  const min = options.min ?? 0
-  const parsed = Number(value)
-  const finite = Number.isFinite(parsed) ? parsed : fallback
-  const bounded = Math.max(min, finite)
-  const clamped = typeof options.max === 'number' ? Math.min(options.max, bounded) : bounded
-  return options.integer ? Math.round(clamped) : clamped
-}
-
 export function settingsFingerprint(value: Settings | null | undefined): string {
-  return value ? JSON.stringify(prepareSettingsForSave(value)) : ''
+  return value ? JSON.stringify(value) : ''
 }
 
-export function buildApiDocItems(
-  serviceBaseUrl: string,
-  currentApiKey: string,
-  models: { chat?: string; image?: string; imageEdit?: string } = {},
-): SettingsApiDocItem[] {
+export function buildApiDocItems(serviceBaseUrl: string, currentApiKey: string): SettingsApiDocItem[] {
   const cleanServiceBaseUrl = String(serviceBaseUrl || '').replace(/\/$/, '')
   const openAIBaseUrl = `${cleanServiceBaseUrl}/v1`
-  const chatModel = models.chat || 'gpt-5-mini'
-  const imageModel = models.image || 'gpt-image-2'
-  const imageEditModel = models.imageEdit || imageModel
   return [
     {
       title: '模型列表',
       method: 'GET',
       path: '/v1/models',
-      description: '返回当前 GPT 与 Grok 可用模型。',
+      description: '返回 OpenAI 兼容模型列表。',
       example: `curl ${openAIBaseUrl}/models \\\n  -H "Authorization: Bearer ${currentApiKey}"`,
     },
     {
       title: '聊天补全',
       method: 'POST',
       path: '/v1/chat/completions',
-      description: 'GPT 与 Grok 共用的 OpenAI 兼容聊天补全接口。',
-      example: `curl ${openAIBaseUrl}/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"${chatModel}","messages":[{"role":"user","content":"你好"}]}'`,
+      description: 'OpenAI 兼容聊天补全接口，图片兼容场景也会解析 n 等参数。',
+      example: `curl ${openAIBaseUrl}/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"gpt-5-mini","messages":[{"role":"user","content":"你好"}]}'`,
     },
     {
       title: 'Responses',
       method: 'POST',
       path: '/v1/responses',
-      description: 'GPT 与 Grok 共用的 Responses 兼容入口。',
-      example: `curl ${openAIBaseUrl}/responses \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"${chatModel}","input":"介绍一座未来城市"}'`,
+      description: '兼容 Responses 输入结构，支持文本与工具调用场景。',
+      example: `curl ${openAIBaseUrl}/responses \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"gpt-5-mini","input":"生成一张未来城市图片"}'`,
     },
     {
       title: 'Messages',
       method: 'POST',
       path: '/v1/messages',
-      description: 'GPT 与 Grok 共用的 Anthropic Messages 兼容入口。',
-      example: `curl ${openAIBaseUrl}/messages \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"${chatModel}","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'`,
+      description: 'Anthropic Messages 兼容入口，支持 Authorization Bearer 或 x-api-key 鉴权。',
+      example: `curl ${openAIBaseUrl}/messages \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"gpt-5-mini","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'`,
     },
     {
       title: '联网搜索',
       method: 'POST',
       path: '/v1/search',
-      description: '本地搜索入口，返回 answer 与 sources。',
-      example: `curl ${openAIBaseUrl}/search \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"prompt":"今天的 AI 新闻"}'`,
+      description: '本地搜索兼容入口，返回 answer 与 sources。',
+      example: `curl ${openAIBaseUrl}/search \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"prompt":"今天的 OpenAI 新闻"}'`,
     },
     {
       title: '图片生成',
       method: 'POST',
       path: '/v1/images/generations',
-      description: 'GPT 与 Grok 共用的图片生成入口，按 model 自动路由供应商。',
-      example: `curl ${openAIBaseUrl}/images/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"${imageModel}","prompt":"一张极简产品海报","n":1}'`,
+      description: '图片生成接口，支持 prompt、model、n、size、quality 等参数。',
+      example: `curl ${openAIBaseUrl}/images/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -d '{"model":"gpt-image-2","prompt":"一张极简产品海报","n":1}'`,
     },
     {
       title: '图片编辑',
       method: 'POST',
       path: '/v1/images/edits',
-      description: 'GPT 与 Grok 共用的图片编辑入口，按 model 自动路由供应商。',
-      example: `curl ${openAIBaseUrl}/images/edits \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -F "model=${imageEditModel}" \\\n  -F "prompt=改成赛博朋克夜景" \\\n  -F "image=@./input.png"`,
+      description: '图片编辑接口，支持 multipart 上传参考图。',
+      example: `curl ${openAIBaseUrl}/images/edits \\\n  -H "Authorization: Bearer ${currentApiKey}" \\\n  -F "model=gpt-image-2" \\\n  -F "prompt=改成赛博朋克夜景" \\\n  -F "image=@./input.png"`,
     },
     {
       title: '创建可编辑文件任务',
@@ -344,7 +225,7 @@ export function buildApiDocItems(
       title: '文件下载',
       method: 'GET',
       path: '/files/{file_path}',
-      description: '下载 PPT/PSD 任务生成的公开文件。',
+      description: '公开下载 PPT/PSD 任务生成的文件或压缩包，无需鉴权。',
       example: `curl ${cleanServiceBaseUrl}/files/{file_path}`,
     },
   ]

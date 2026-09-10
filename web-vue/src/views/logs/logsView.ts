@@ -1,11 +1,8 @@
 import type { GalleryFile } from '@/api/gallery'
-import type { RuntimeLog, SystemLogsResponse, SystemLogRow } from '@/api/logs'
-import type { ActionMenuItem } from 'nanocat-ui'
-import { actionMenuGroups } from '@/components/ai/menuItems'
-import {
-  isSystemLogFailed as isFailed,
-  isSystemLogLimited as isLimited,
-  isSystemLogSuccess as isSuccess,
+import type {
+  PresentationTone,
+  SystemLogsResponse,
+  SystemLogRow,
 } from '@/api/logs'
 
 export type LogFilterOption = { label: string; value: string }
@@ -27,12 +24,6 @@ export type SystemLogFilters = {
   type: string
 }
 
-export type RuntimeLogFilters = {
-  level: string
-  source: string
-  search: string
-}
-
 export type AdvancedLogFilterKey = 'type' | 'status' | 'model' | 'account'
 
 export type LogMetricItem = {
@@ -41,9 +32,7 @@ export type LogMetricItem = {
   class: string
 }
 
-export type LogStatusTone = 'success' | 'danger' | 'warning' | 'muted'
-
-type RuntimeFilterKey = 'level' | 'source'
+export type LogStatusTone = PresentationTone
 
 type AdvancedConditionGroup = {
   key: AdvancedLogFilterKey
@@ -64,6 +53,21 @@ export type SystemLogRowSignatureInput = {
   firstImageBroken: boolean
 }
 
+type LogDurationDisplay = {
+  total: string
+  breakdown: string
+}
+
+export type LogCellDisplay = {
+  primary: string
+  secondary: string
+}
+
+export type LogRequestDisplay = LogCellDisplay & {
+  kind: string
+  parameters?: string
+}
+
 export const typeOptions = [
   { label: '调用日志', value: 'call' },
   { label: '账号日志', value: 'account' },
@@ -71,28 +75,6 @@ export const typeOptions = [
 ]
 
 export const systemLogPageSizeOptions = [20, 50, 100, 200, 500]
-
-export const runtimeLimitOptions = [
-  { label: '100', value: '100' },
-  { label: '300', value: '300' },
-  { label: '500', value: '500' },
-  { label: '1000', value: '1000' },
-  { label: '2000', value: '2000' },
-]
-
-export const runtimeLevelOptions = [
-  { label: '全部级别', value: '' },
-  { label: 'debug', value: 'debug' },
-  { label: 'info', value: 'info' },
-  { label: 'warning', value: 'warning' },
-  { label: 'error', value: 'error' },
-]
-
-export const runtimeSourceOptions = [
-  { label: '全部来源', value: '' },
-  { label: '内存日志', value: 'memory' },
-  { label: '文件尾部', value: 'file' },
-]
 
 export const statusOptions = [
   { label: '全部状态', value: '' },
@@ -126,48 +108,6 @@ function boundedSignatureText(value: unknown, limit = 180): string {
   const text = signatureValue(value)
   if (text.length <= limit) return text
   return `${text.length}:${text.slice(0, limit)}:${text.slice(-24)}`
-}
-
-export function currentMenuLabel(label: string, active: boolean): string {
-  return active ? `${label}（当前）` : label
-}
-
-export function buildRuntimeFilterMenuItems(filters: Pick<RuntimeLogFilters, 'level' | 'source'>): ActionMenuItem[] {
-  return actionMenuGroups<ActionMenuItem>(
-    runtimeLevelOptions
-      .filter((item) => item.value)
-      .map((item) => ({
-        key: `runtime-level:${item.value}`,
-        label: currentMenuLabel(`级别 ${item.label}`, filters.level === item.value),
-      })),
-    runtimeSourceOptions
-      .filter((item) => item.value)
-      .map((item) => ({
-        key: `runtime-source:${item.value}`,
-        label: currentMenuLabel(item.label, filters.source === item.value),
-      })),
-    [
-      { key: 'runtime-clear:level', label: '清除级别筛选', disabled: !filters.level },
-      { key: 'runtime-clear:source', label: '清除来源筛选', disabled: !filters.source },
-    ],
-  )
-}
-
-export function parseRuntimeFilterMenuKey(key: string): { key: RuntimeFilterKey; value: string } | null {
-  if (key.startsWith('runtime-level:')) {
-    return { key: 'level', value: key.slice('runtime-level:'.length) }
-  }
-  if (key.startsWith('runtime-source:')) {
-    return { key: 'source', value: key.slice('runtime-source:'.length) }
-  }
-  if (key === 'runtime-clear:level') return { key: 'level', value: '' }
-  if (key === 'runtime-clear:source') return { key: 'source', value: '' }
-  return null
-}
-
-export function normalizeRuntimeLimit(value: unknown, fallback = 500): number {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), 2000) : fallback
 }
 
 export function optionFromFacet(facet: Record<string, number>, allLabel: string): LogFilterOption[] {
@@ -221,50 +161,75 @@ export function buildAdvancedConditionMenuGroups(
   }))
 }
 
-export function typeLabel(type: string): string {
-  if (type === 'call') return '调用日志'
-  if (type === 'account') return '账号日志'
-  return type || '日志'
+export function requestDisplay(item: SystemLogRow): LogRequestDisplay {
+  return item.presentation.request
 }
 
-export function tokenLabel(item: SystemLogRow): string {
-  return item.keyName || item.keyId || item.accountEmail
+export function executionDisplay(item: SystemLogRow): LogCellDisplay {
+  return item.presentation.execution
+}
+
+export function outcomeText(item: SystemLogRow): string {
+  return item.presentation.result.text
+}
+
+export function resultDiagnostics(item: SystemLogRow): string {
+  return item.presentation.result.diagnostics
 }
 
 export function summaryText(item: SystemLogRow): string {
-  return item.summary || item.error || item.reason || item.preview
+  return item.presentation.summary_text
 }
 
 export function statusLabel(item: SystemLogRow): string {
-  if (isSuccess(item)) return '成功'
-  if (isFailed(item)) return '失败'
-  if (isLimited(item)) return '受限'
-  return item.status || '记录'
+  return item.presentation.status.label
 }
 
 export function statusTone(item: SystemLogRow): LogStatusTone {
-  if (isSuccess(item)) return 'success'
-  if (isFailed(item)) return 'danger'
-  if (isLimited(item)) return 'warning'
-  return 'muted'
+  return item.presentation.status.tone
+}
+
+export function logDurationDisplay(item: SystemLogRow): LogDurationDisplay {
+  return {
+    total: item.presentation.duration.text,
+    breakdown: item.presentation.duration.breakdown,
+  }
+}
+
+export function logDurationTone(item: SystemLogRow): LogStatusTone {
+  return item.presentation.duration.tone
 }
 
 export function systemLogRowSignature(item: SystemLogRow, input: SystemLogRowSignatureInput): string {
+  const durationDisplay = logDurationDisplay(item)
+  const request = requestDisplay(item)
+  const execution = executionDisplay(item)
   return [
     item.id,
     input.selected ? 1 : 0,
     input.firstImageBroken ? 1 : 0,
     boundedSignatureText(item.time),
-    boundedSignatureText(typeLabel(item.type), 64),
-    boundedSignatureText(tokenLabel(item), 96),
-    boundedSignatureText(item.durationMs, 64),
+    boundedSignatureText(request.primary, 96),
+    boundedSignatureText(request.kind, 64),
+    boundedSignatureText(request.secondary, 128),
+    boundedSignatureText(request.parameters, 160),
+    boundedSignatureText(item.presentation.result.resolution, 160),
+    boundedSignatureText(execution.primary, 96),
+    boundedSignatureText(execution.secondary, 96),
+    boundedSignatureText(durationDisplay.total, 64),
+    boundedSignatureText(durationDisplay.breakdown, 160),
     boundedSignatureText(statusLabel(item), 64),
     statusTone(item),
-    boundedSignatureText(summaryText(item)),
+    boundedSignatureText(outcomeText(item)),
+    boundedSignatureText(resultDiagnostics(item), 160),
+    item.imageRequestedCount,
+    item.imageSucceededCount,
     item.imageUrls.length,
+    item.attemptCount,
+    item.accountSwitchCount,
     item.imageUrls.slice(0, 4).map((url) => boundedSignatureText(url, 96)).join(','),
     boundedSignatureText(item.preview),
-    isFailed(item) ? 1 : 0,
+    item.presentation.is_failure ? 1 : 0,
   ].map(signatureValue).join('|')
 }
 
@@ -300,74 +265,39 @@ export function buildLogPreviewGalleryFile(image: LogPreviewImage | null | undef
   if (!image) return null
   const filename = image.filename || filenameFromUrl(image.title || image.url) || 'log-preview-image'
   return {
+    id: image.title || image.url,
     filename,
     path: image.title || image.url,
     url: image.url,
     thumbnail_url: image.url,
-    size: 0,
+    size_bytes: 0,
     created_at: '',
-    mtime: 0,
     date: '',
-    type: 'image',
+    media_type: 'image',
     expired: false,
+    expires_at: null,
     expires_in_seconds: null,
     tags: [],
     storage: 'log',
     local: false,
     webdav: false,
+    available: true,
     width: null,
     height: null,
+    genbox_push: null,
   }
-}
-
-export function formatRuntimeLogLine(item: RuntimeLog): string {
-  const time = cleanLogString(item.time)
-  const level = cleanLogString(item.level).toUpperCase()
-  const source = cleanLogString(item.source)
-  const message = cleanLogString(item.message) || '-'
-  const path = cleanLogString(item.path)
-  return [
-    time,
-    level,
-    source ? `[${source}]` : '',
-    message,
-    path,
-  ].filter(Boolean).join(' ')
-}
-
-export function runtimeStats(items: readonly RuntimeLog[]) {
-  const counts = { total: items.length, warning: 0, error: 0, memory: 0, file: 0 }
-  items.forEach((item) => {
-    const level = cleanLogString(item.level).toLowerCase()
-    const source = cleanLogString(item.source).toLowerCase()
-    if (level === 'warning') counts.warning += 1
-    if (level === 'error' || level === 'critical') counts.error += 1
-    if (source === 'memory') counts.memory += 1
-    if (source === 'file') counts.file += 1
-  })
-  return counts
 }
 
 export function systemMetricItems(logMeta: Pick<SystemLogsResponse, 'stats' | 'stats_scope'>): LogMetricItem[] {
   const stats = logMeta.stats
   const pageScope = logMeta.stats_scope === 'page'
   return [
-    { label: '总数', value: stats.total, class: 'text-foreground' },
+    { label: pageScope ? '本页总数' : '总数', value: stats.total, class: 'text-foreground' },
     { label: pageScope ? '本页成功' : '成功', value: stats.success, class: 'text-emerald-600' },
+    { label: pageScope ? '本页文本' : '文本', value: stats.text_review, class: 'text-violet-600' },
     { label: pageScope ? '本页失败' : '失败', value: stats.failed, class: 'text-rose-600' },
     { label: pageScope ? '本页限流' : '限流', value: stats.limited, class: 'text-amber-600' },
     { label: pageScope ? '本页图片' : '图片接口', value: stats.image, class: 'text-cyan-600' },
-  ]
-}
-
-export function runtimeMetricItems(items: readonly RuntimeLog[]): LogMetricItem[] {
-  const counts = runtimeStats(items)
-  return [
-    { label: '运行日志', value: counts.total, class: 'text-foreground' },
-    { label: 'Warning', value: counts.warning, class: 'text-amber-600' },
-    { label: 'Error', value: counts.error, class: 'text-rose-600' },
-    { label: '内存', value: counts.memory, class: 'text-cyan-600' },
-    { label: '文件', value: counts.file, class: 'text-violet-600' },
   ]
 }
 
@@ -382,14 +312,6 @@ export function activeSystemFilterCount(filters: SystemLogFilters): number {
     filters.account,
     filters.conversationId,
     filters.type !== 'call' ? filters.type || 'all' : '',
-  ].filter(Boolean).length
-}
-
-export function activeRuntimeFilterCount(filters: RuntimeLogFilters): number {
-  return [
-    filters.level,
-    filters.source,
-    filters.search,
   ].filter(Boolean).length
 }
 

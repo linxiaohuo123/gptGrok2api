@@ -4,12 +4,19 @@
       <div>
         <p class="ui-section-title">提示词源</p>
         <p class="mt-1 text-xs text-muted-foreground">
-          Studio 从本地快照读取提示词；这里仅负责启用词源并手动同步到本地。
+          Studio 只读取本地快照；更新时从
+          <a
+            href="https://github.com/yukkcat/image-prompts"
+            target="_blank"
+            rel="noreferrer"
+            class="font-medium text-foreground hover:underline"
+          >yukkcat/image-prompts</a>
+          下载并覆盖本地快照。
         </p>
       </div>
       <div class="settings-prompt-sources-actions">
-        <Button size="sm" variant="primary" :disabled="refreshing === 'all' || loading" @click="refreshAll">
-          {{ refreshing === 'all' ? '更新中...' : '更新启用词源' }}
+        <Button size="sm" variant="primary" :disabled="mutationBusy || loading" @click="refreshAll">
+          {{ refreshing ? '更新中...' : '更新本地快照' }}
         </Button>
       </div>
     </div>
@@ -32,13 +39,13 @@
           <div class="settings-prompt-source-title">
             <span class="settings-prompt-source-name">{{ source.name || source.id }}</span>
             <MetaChip
-              v-if="source.last_error"
+              v-if="source.sync_state !== 'synced'"
               size="xs"
-              :tone="source.prompt_count > 0 ? 'warning' : 'danger'"
+              :tone="source.sync_tone"
               variant="outline"
-              :title="source.last_error"
+              :title="source.last_error || source.sync_message"
             >
-              {{ source.prompt_count > 0 ? '缓存可用' : '同步失败' }}
+              {{ source.sync_label }}
             </MetaChip>
             <MetaChip v-if="source.built_in" size="xs" tone="muted" variant="outline">
               内置
@@ -55,29 +62,21 @@
           <div class="settings-prompt-source-meta">
             <MetaChip size="xs" tone="muted">{{ source.prompt_count }} 条</MetaChip>
             <span class="settings-prompt-source-meta-text" :title="source.last_error || ''">
-              {{ source.last_error ? '缓存' : '同步' }} {{ promptSyncTime(source.last_sync_at) }}
+              {{ source.sync_label }} {{ promptSyncTime(source.last_sync_at) }}
             </span>
             <span v-if="source.last_fetch_ms" class="settings-prompt-source-meta-text" :title="source.last_error || ''">
-              {{ source.last_error ? '失败 ' : '' }}{{ source.last_fetch_ms }}ms
+              {{ source.last_fetch_ms }}ms
             </span>
           </div>
 
           <div class="settings-prompt-source-actions">
             <Checkbox
               :model-value="source.enabled"
-              :disabled="busySourceId === source.id || refreshing === source.id"
+              :disabled="mutationBusy"
               @update:model-value="toggleSource(source, Boolean($event))"
             >
               启用
             </Checkbox>
-            <Button
-              size="xs"
-              variant="outline"
-              :disabled="refreshing === source.id || busySourceId === source.id"
-              @click="refreshOne(source)"
-            >
-              {{ refreshing === source.id ? '更新中' : '更新' }}
-            </Button>
           </div>
         </div>
       </article>
@@ -86,98 +85,70 @@
         暂无提示词源。
       </StateBlock>
     </div>
+
+    <OperationProgressDrawer
+      :open="operationProgress.open"
+      :title="operationProgress.title"
+      :subtitle="operationProgress.subtitle"
+      :total="operationProgress.total"
+      :current="operationProgress.current"
+      :status-label="operationProgress.statusLabel"
+      :error="operationProgress.error"
+      :busy="operationProgress.busy"
+      :tone="operationProgress.tone"
+      :events="operationProgress.events"
+      @close="closeOperationProgress"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { Button, Checkbox } from 'nanocat-ui'
-import { promptsApi, type PromptSource } from '@/api/prompts'
+import type { PromptSource } from '@/api/prompts'
 import MetaChip from '@/components/ai/MetaChip.vue'
+import OperationProgressDrawer from '@/components/ai/OperationProgressDrawer.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
-import { preloadPromptLibrary } from '@/composables/usePromptLibraryRuntime'
+import { usePromptLibraryRuntime } from '@/composables/usePromptLibraryRuntime'
 import { useToast } from '@/composables/useToast'
 import { promptSyncTime } from '@/lib/promptLibrary'
+import { useSettingsPromptSourcesOperationRuntime } from '@/views/settings/settingsPromptSourcesOperationRuntime'
 
 const toast = useToast()
-const sources = ref<PromptSource[]>([])
-const loading = ref(false)
-const refreshing = ref('')
-const busySourceId = ref('')
-
-async function reloadStudioPromptLibrary() {
-  await preloadPromptLibrary(true).catch(() => {})
-}
-
+const {
+  sources,
+  loading,
+  loadError,
+  mutationBusy,
+  mutationAction,
+  loadPrompts,
+  updatePromptSource,
+  refreshPromptSources,
+} = usePromptLibraryRuntime()
+const refreshing = computed(() => mutationAction.value === 'refresh-all')
+const promptSourcesOperation = useSettingsPromptSourcesOperationRuntime({
+  sources,
+  refreshSources: refreshPromptSources,
+})
+const operationProgress = promptSourcesOperation.operationProgress
+const closeOperationProgress = promptSourcesOperation.closeOperationProgress
 async function loadSources() {
-  if (loading.value) return
-  loading.value = true
-  try {
-    const result = await promptsApi.listSources()
-    sources.value = result.sources
-  } catch (error: any) {
-    toast.error(error?.message || '提示词源读取失败')
-  } finally {
-    loading.value = false
-  }
+  const loaded = await loadPrompts()
+  if (!loaded && loadError.value) toast.error(loadError.value)
 }
 
 async function toggleSource(source: PromptSource, enabled: boolean) {
-  if (busySourceId.value) return
-  busySourceId.value = source.id
   try {
-    const result = await promptsApi.updateSource(source.id, { enabled })
-    sources.value = result.sources
-    await reloadStudioPromptLibrary()
+    await updatePromptSource(source.id, { enabled })
     toast.success(enabled ? '提示词源已启用' : '提示词源已停用')
   } catch (error: any) {
     toast.error(error?.message || '提示词源更新失败')
-  } finally {
-    busySourceId.value = ''
-  }
-}
-
-async function refreshOne(source: PromptSource) {
-  if (refreshing.value) return
-  refreshing.value = source.id
-  try {
-    const result = await promptsApi.refreshSource(source.id)
-    sources.value = result.sources
-    await reloadStudioPromptLibrary()
-    const current = result.sources.find((item) => item.id === source.id)
-    if (current?.last_error) {
-      toast.error(`${current.name || source.name || '提示词源'} 同步失败，已保留本地缓存`)
-    } else {
-      toast.success('提示词源已更新到本地')
-    }
-  } catch (error: any) {
-    toast.error(error?.message || '提示词源更新失败')
-    await loadSources()
-  } finally {
-    refreshing.value = ''
   }
 }
 
 async function refreshAll() {
-  if (refreshing.value) return
-  refreshing.value = 'all'
-  try {
-    const result = await promptsApi.refreshSources()
-    sources.value = result.sources
-    await reloadStudioPromptLibrary()
-    const failedSources = result.sources.filter((source) => source.enabled && source.last_error)
-    if (failedSources.length > 0) {
-      toast.error(`${failedSources.length} 个词源同步失败，已保留本地缓存`)
-    } else {
-      toast.success('启用词源已更新到本地')
-    }
-  } catch (error: any) {
-    toast.error(error?.message || '提示词源更新失败')
-    await loadSources()
-  } finally {
-    refreshing.value = ''
-  }
+  await promptSourcesOperation.refreshAllSources()
 }
 
 onMounted(() => {

@@ -15,7 +15,6 @@ type Toast = {
 type GalleryInteractionRuntimeOptions = {
   toast: Toast
   files: Ref<GalleryFile[]>
-  allTags: Ref<string[]>
   tagFilter: Ref<string>
   loadGallery: () => Promise<void>
   resetAndLoad: () => void
@@ -32,6 +31,10 @@ export function useGalleryInteractionRuntime(options: GalleryInteractionRuntimeO
   const selectedCount = computed(() => selectedPaths.value.size)
   const allVisibleSelected = computed(() => (
     options.files.value.length > 0 && options.files.value.every((file) => selectedPaths.value.has(file.path))
+  ))
+  const someVisibleSelected = computed(() => (
+    !allVisibleSelected.value
+    && options.files.value.some((file) => selectedPaths.value.has(file.path))
   ))
   const draftTags = computed(() => parseTags(tagDraft.value))
 
@@ -77,17 +80,15 @@ export function useGalleryInteractionRuntime(options: GalleryInteractionRuntimeO
       const result = await galleryApi.updateTags(file.path, tags)
       const nextTags = result.tags || tags
       applyFileTags(file.path, nextTags)
-      options.allTags.value = await galleryApi.getTags()
-      if (options.tagFilter.value !== 'all' && !nextTags.includes(options.tagFilter.value)) {
-        await options.loadGallery()
-      }
-      options.toast.success('标签已保存。', '保存成功')
-      closeTagEditor()
     } catch (error) {
       options.toast.error(errorMessage(error, '保存标签失败'), '保存失败')
+      return
     } finally {
       isTagSaving.value = false
     }
+    closeTagEditor()
+    options.toast.success('标签已保存。', '保存成功')
+    await options.loadGallery()
   }
 
   function toggleDraftTag(tag: string) {
@@ -163,6 +164,7 @@ export function useGalleryInteractionRuntime(options: GalleryInteractionRuntimeO
     selectedPaths,
     selectedCount,
     allVisibleSelected,
+    someVisibleSelected,
     draftTags,
     openPreview,
     closePreview,

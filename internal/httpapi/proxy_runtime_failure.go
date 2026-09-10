@@ -1,3 +1,8 @@
+// [INPUT]: proxy
+// [OUTPUT]: 运行时失败回写：persistProxyGroupRuntimeResult
+// [POS]: 把真实请求的成功/失败写回代理组配置，驱动节点冷却与驱逐。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (

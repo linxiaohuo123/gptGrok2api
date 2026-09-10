@@ -69,7 +69,7 @@
       </p>
       <div class="flex flex-wrap items-center gap-2">
         <label
-          v-if="activeMode === 'sub2api'"
+          v-if="activeMode === 'sub2api' && !hasFixedTargetGroup"
           class="flex items-center gap-1.5 text-xs text-muted-foreground"
         >
           <Checkbox
@@ -158,7 +158,7 @@
                 <span class="min-w-0">
                   <span class="block truncate text-sm text-foreground">{{ account.email || account.name || account.id }}</span>
                   <span class="block truncate text-xs text-muted-foreground">
-                    {{ account.plan_type || '-' }} · {{ account.status || '-' }} · {{ account.has_access_token ? '有 access token' : '需导出 token' }}
+                    {{ account.plan_type || '未知' }} · {{ account.status || '-' }} · {{ account.has_access_token ? '有 access token' : '需导出 token' }}
                   </span>
                 </span>
                 <Checkbox
@@ -174,8 +174,8 @@
     </SelectableListPanel>
 
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <p class="text-xs text-muted-foreground">{{ progressText }}</p>
-      <Button size="xs" variant="primary" :disabled="busy || selectedCount === 0" @click="startImport">
+      <p class="text-xs text-muted-foreground">{{ importStatusText }}</p>
+      <Button size="xs" variant="primary" :disabled="busy || remoteImportActive || selectedCount === 0" @click="startImport">
         {{ busy ? '处理中...' : '导入选中' }}
       </Button>
     </div>
@@ -186,11 +186,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { Button, Checkbox } from 'nanocat-ui'
 import { Icon } from '@iconify/vue'
-import { accountImportsApi } from '@/api/accountImports'
+import { accountImportsApi, remoteImportJobIsActive } from '@/api/accountImports'
 import type {
   CPAImportJob,
   CPAPool,
   CPARemoteFile,
+  RemoteAccountImportMode,
+  RemoteAccountImportStarted,
   Sub2APIImportGroupBinding,
   Sub2APIRemoteAccount,
   Sub2APIRemoteGroup,
@@ -198,16 +200,19 @@ import type {
 } from '@/api/accountImports'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
+import { GroupedSelectMenu } from 'nanocat-ui'
 import ImportModePanel from './ImportModePanel.vue'
 import SelectableListPanel from './SelectableListPanel.vue'
 
-type RemoteImportMode = 'cpa' | 'sub2api'
 type Sub2APIAccountGroup = {
   key: string
   remoteGroupId: string
   name: string
   accounts: Sub2APIRemoteAccount[]
+}
+type RemoteImportSource = {
+  id: string
+  import_job?: CPAImportJob | null
 }
 
 const DEFAULT_GROUP_VALUE = '__default__'
@@ -215,26 +220,37 @@ const UNGROUPED_SUB2API_GROUP_KEY = '__ungrouped__'
 const UNGROUPED_SUB2API_GROUP_NAME = '未分组账号'
 
 const props = withDefaults(defineProps<{
-  mode: RemoteImportMode
+  mode: RemoteAccountImportMode
   cpaPoolId?: string
   sub2apiServerId?: string
   sub2apiGroupId?: string
   showModeSwitch?: boolean
+  externalTracking?: boolean
+  targetGroupId?: string | null
 }>(), {
   cpaPoolId: '',
   sub2apiServerId: '',
   sub2apiGroupId: undefined,
   showModeSwitch: false,
+  externalTracking: false,
+  targetGroupId: null,
 })
 
 const emit = defineEmits<{
   imported: []
   'busy-change': [value: boolean]
+  started: [value: RemoteAccountImportStarted]
+  progress: [value: {
+    title: string
+    total: number
+    job?: CPAImportJob | null
+    error?: string
+  }]
 }>()
 
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
-const activeMode = ref<RemoteImportMode>(props.mode)
+const activeMode = ref<RemoteAccountImportMode>(props.mode)
 const busy = ref(false)
 const cpaPools = ref<CPAPool[]>([])
 const remoteCPAFiles = ref<CPARemoteFile[]>([])
@@ -251,6 +267,12 @@ const sub2apiDuplicateCount = ref(0)
 const collapsedSub2APIGroups = ref<Record<string, boolean>>({})
 const importSub2APIByGroups = ref(true)
 const importJob = ref<CPAImportJob | null>(null)
+const emittedImportJobIds = new Set<string>()
+const hasFixedTargetGroup = computed(() => props.targetGroupId !== null)
+const remoteImportActive = computed(() => (
+  [...cpaPools.value, ...sub2apiServers.value]
+    .some((source) => remoteImportJobIsActive(source.import_job))
+))
 
 const modeOptions = [
   { label: 'CPA', value: 'cpa' },
@@ -398,10 +420,13 @@ const emptyText = computed(() => {
   return activeMode.value === 'cpa' ? '暂无可导入文件' : '暂无可导入账号'
 })
 
-const progressText = computed(() => {
+const importStatusText = computed(() => {
+  if (remoteImportActive.value && !remoteImportJobIsActive(importJob.value)) {
+    return '已有账号导入任务正在运行'
+  }
   const job = importJob.value
   if (!job) return '未开始导入'
-  return `进度 ${job.completed}/${job.total}，新增 ${job.added}，跳过 ${job.skipped}，刷新 ${job.refreshed}，失败 ${job.failed}`
+  return job.result_message || job.status_label
 })
 
 watch(busy, (value) => emit('busy-change', value))
@@ -470,7 +495,7 @@ function resetItems() {
   importJob.value = null
 }
 
-function setMode(mode: RemoteImportMode) {
+function setMode(mode: RemoteAccountImportMode) {
   if (busy.value || activeMode.value === mode) return
   activeMode.value = mode
   resetItems()
@@ -521,12 +546,11 @@ async function runBusy(action: () => Promise<void>) {
 
 async function refreshSources(autoLoadItems = false) {
   await runBusy(async () => {
+    await Promise.all([loadCPAPools(), loadSub2APIServers()])
     if (activeMode.value === 'cpa') {
-      await loadCPAPools()
       if (autoLoadItems && selectedCPAPoolId.value) await loadCPAFiles()
       return
     }
-    await loadSub2APIServers()
     if (selectedSub2APIServerId.value) await loadSub2APIGroups(selectedSub2APIServerId.value)
     if (autoLoadItems && selectedSub2APIServerId.value) await loadSub2APIAccounts()
   })
@@ -544,6 +568,7 @@ async function loadCPAPools() {
     const response = await accountImportsApi.listCPAPools()
     cpaPools.value = Array.isArray(response.pools) ? response.pools : []
     if (!selectedCPAPoolId.value && cpaPools.value.length > 0) selectedCPAPoolId.value = cpaPools.value[0].id
+    emitRecoverableImportJobs('cpa', cpaPools.value, selectedCPAPoolId.value)
   } catch (error: any) {
     cpaPools.value = []
     toast.error(error.message || '加载 CPA 连接失败')
@@ -574,6 +599,7 @@ async function loadSub2APIServers() {
     if (!selectedSub2APIServerId.value && sub2apiServers.value.length > 0) {
       selectedSub2APIServerId.value = sub2apiServers.value[0].id
     }
+    emitRecoverableImportJobs('sub2api', sub2apiServers.value, selectedSub2APIServerId.value)
   } catch (error: any) {
     sub2apiServers.value = []
     toast.error(error.message || '加载 Sub2API 连接失败')
@@ -773,20 +799,61 @@ function clearSelection() {
   selectedSub2APIAccountIds.value = []
 }
 
-async function pollImportJob(sourceId: string) {
+function emitStarted(
+  mode: RemoteAccountImportMode,
+  sourceId: string,
+  job: CPAImportJob | null,
+  title: string,
+  total: number,
+) {
+  const jobId = String(job?.job_id || '').trim()
+  if (!job || !jobId || emittedImportJobIds.has(jobId)) return
+  emittedImportJobIds.add(jobId)
+  emit('started', {
+    mode,
+    source_id: sourceId,
+    job,
+    title,
+    total: Math.max(0, Number(total || job.total || 0)),
+  })
+}
+
+function emitRecoverableImportJobs(
+  mode: RemoteAccountImportMode,
+  sources: RemoteImportSource[],
+  currentSourceId: string,
+) {
+  if (!props.externalTracking) return
+  const current = sources.find((source) => source.id === currentSourceId)
+  const orderedSources = current
+    ? [current, ...sources.filter((source) => source.id !== currentSourceId)]
+    : sources
+  const title = mode === 'cpa' ? '导入远程 CPA' : '导入 Sub2API 账号'
+  for (const source of orderedSources) {
+    const job = source.import_job
+    if (!job || (job.status !== 'pending' && job.status !== 'running')) continue
+    emitStarted(mode, source.id, job, title, job.total)
+  }
+}
+
+async function pollImportJob(sourceId: string, title: string, total: number) {
   for (let index = 0; index < 180; index += 1) {
     const response = activeMode.value === 'cpa'
       ? await accountImportsApi.getCPAImportJob(sourceId)
       : await accountImportsApi.getSub2APIImportJob(sourceId)
     importJob.value = response.import_job || null
-    const status = importJob.value?.status
-    if (status === 'completed' || status === 'failed') return importJob.value
+    emit('progress', { title, total, job: importJob.value })
+    if (importJob.value?.terminal) return importJob.value
     await new Promise((resolve) => window.setTimeout(resolve, 1000))
   }
   throw new Error('导入进度超时')
 }
 
 async function startImport() {
+  if (remoteImportActive.value) {
+    toast.warning('请等待当前账号导入任务完成')
+    return
+  }
   if (activeMode.value === 'cpa') {
     await startCPAImport()
     return
@@ -808,20 +875,28 @@ async function startCPAImport() {
   if (!confirmed) return
 
   await runBusy(async () => {
+    const title = '导入远程 CPA'
+    emit('progress', { title, total: names.length })
     try {
-      const start = await accountImportsApi.startCPAImport(poolId, names)
+      const start = await accountImportsApi.startCPAImport(poolId, names, props.targetGroupId)
       importJob.value = start.import_job || null
-      const job = await pollImportJob(poolId)
-      showImportResult('远程 CPA 导入完成', job)
-      emit('imported')
+      emitStarted('cpa', poolId, importJob.value, title, names.length)
+      if (props.externalTracking && !importJob.value?.job_id) throw new Error('后端没有返回 CPA 导入任务')
+      if (props.externalTracking) return
+      emit('progress', { title, total: names.length, job: importJob.value })
+      const job = await pollImportJob(poolId, title, names.length)
+      showImportResult(job)
+      if (job?.status !== 'failed') emit('imported')
     } catch (error: any) {
-      toast.error(error.message || '远程 CPA 导入失败')
+      const message = error.message || '远程 CPA 导入失败'
+      emit('progress', { title, total: names.length, error: message })
+      if (!props.externalTracking) toast.error(message)
     }
   })
 }
 
 function buildSub2APIGroupBindings(accountIds: string[]) {
-  if (!importSub2APIByGroups.value) return []
+  if (hasFixedTargetGroup.value || !importSub2APIByGroups.value) return []
   const selected = new Set(accountIds)
   const bindings: Sub2APIImportGroupBinding[] = []
   for (const group of sub2apiAccountGroups.value) {
@@ -855,26 +930,44 @@ async function startSub2APIImport() {
   if (!confirmed) return
 
   await runBusy(async () => {
+    const title = '导入 Sub2API 账号'
+    emit('progress', { title, total: accountIds.length })
     try {
       const start = await accountImportsApi.startSub2APIImport(serverId, accountIds, {
         group_bindings: groupBindings,
-        create_account_groups: importSub2APIByGroups.value,
+        create_account_groups: !hasFixedTargetGroup.value && importSub2APIByGroups.value,
+        target_group_id: props.targetGroupId,
       })
       importJob.value = start.import_job || null
-      const job = await pollImportJob(serverId)
-      showImportResult('Sub2API 导入完成', job)
-      emit('imported')
+      emitStarted('sub2api', serverId, importJob.value, title, accountIds.length)
+      if (props.externalTracking && !importJob.value?.job_id) throw new Error('后端没有返回 Sub2API 导入任务')
+      if (props.externalTracking) return
+      emit('progress', { title, total: accountIds.length, job: importJob.value })
+      const job = await pollImportJob(serverId, title, accountIds.length)
+      showImportResult(job)
+      if (job?.status !== 'failed') emit('imported')
     } catch (error: any) {
-      toast.error(error.message || 'Sub2API 导入失败')
+      const message = error.message || 'Sub2API 导入失败'
+      emit('progress', { title, total: accountIds.length, error: message })
+      if (!props.externalTracking) toast.error(message)
     }
   })
 }
 
-function showImportResult(prefix: string, job: CPAImportJob | null) {
-  const failed = Number(job?.failed || 0)
-  toast[failed > 0 ? 'warning' : 'success'](
-    `${prefix}：新增 ${job?.added || 0}，跳过 ${job?.skipped || 0}，刷新 ${job?.refreshed || 0}，失败 ${failed}`,
-  )
+function showImportResult(job: CPAImportJob | null) {
+  if (!job) {
+    toast.error('没有获取到导入结果')
+    return
+  }
+  if (job.result_tone === 'danger') {
+    toast.error(job.result_message)
+    return
+  }
+  if (job.result_tone === 'warning') {
+    toast.warning(job.result_message)
+    return
+  }
+  toast.success(job.result_message)
 }
 </script>
 

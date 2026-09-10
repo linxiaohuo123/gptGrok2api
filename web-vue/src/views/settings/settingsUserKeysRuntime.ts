@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { onDeactivated, onScopeDispose, ref } from 'vue'
 
 import { userKeysApi, type UserKey } from '@/api/userKeys'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -32,6 +32,34 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
   const userKeyForm = ref<UserKeyForm>(createUserKeyForm())
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
+  let rawKeyClearTimer: ReturnType<typeof window.setTimeout> | null = null
+
+  function clearNewUserKey() {
+    if (rawKeyClearTimer !== null) {
+      window.clearTimeout(rawKeyClearTimer)
+      rawKeyClearTimer = null
+    }
+    newUserKey.value = ''
+  }
+
+  function revealNewUserKey(rawKey: string) {
+    clearNewUserKey()
+    newUserKey.value = rawKey
+    if (!rawKey) return
+    rawKeyClearTimer = window.setTimeout(clearNewUserKey, 120000)
+  }
+
+  function upsertUserKey(item: UserKey) {
+    const index = userKeys.value.findIndex(candidate => candidate.id === item.id)
+    if (index < 0) {
+      userKeys.value = [...userKeys.value, item]
+      return
+    }
+    userKeys.value = userKeys.value.map(candidate => candidate.id === item.id ? item : candidate)
+  }
+
+  onDeactivated(clearNewUserKey)
+  onScopeDispose(clearNewUserKey)
 
   const userKeysQuery = usePageQuery({
     runtime: options.runtime,
@@ -44,6 +72,7 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
     if (!value) return
     try {
       await navigator.clipboard.writeText(value)
+      if (value === newUserKey.value) clearNewUserKey()
       toast.success('已复制密钥')
     } catch {
       toast.error('复制失败，请手动复制')
@@ -56,10 +85,8 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
   }
 
   function openUserKeyCreateModal() {
+    clearNewUserKey()
     resetUserKeyForm()
-    // Prevent a previously generated one-time key from being mistaken for the
-    // key produced by the next create operation.
-    newUserKey.value = ''
     userKeyModal.value = 'create'
   }
 
@@ -97,12 +124,10 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
 
   async function createUserKey() {
     userKeyBusy.value = 'create'
-    newUserKey.value = ''
     try {
       const response = await userKeysApi.create(userKeyForm.value.name.trim())
-      userKeys.value = Array.isArray(response.items) ? response.items : []
-      newUserKey.value = typeof response.key === 'string' ? response.key : ''
-      if (!newUserKey.value) throw new Error('服务器未返回新密钥，请刷新后重试')
+      upsertUserKey(response.item)
+      revealNewUserKey(response.raw_key)
       toast.success('用户密钥已创建')
       userKeyModal.value = ''
       resetUserKeyForm()
@@ -129,7 +154,7 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
     userKeyBusy.value = item.id
     try {
       const response = await userKeysApi.update(item.id, updates)
-      userKeys.value = response.items || []
+      upsertUserKey(response.item)
       toast.success(nextKey ? '用户密钥已更新' : '用户名称已更新')
       userKeyModal.value = ''
       resetUserKeyForm()
@@ -144,7 +169,7 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
     userKeyBusy.value = item.id
     try {
       const response = await userKeysApi.update(item.id, { enabled: !item.enabled })
-      userKeys.value = response.items || []
+      upsertUserKey(response.item)
       toast.success(item.enabled ? '用户密钥已禁用' : '用户密钥已启用')
     } catch (error) {
       toast.error(errorMessage(error, '更新用户密钥失败'))
@@ -165,7 +190,7 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
     userKeyBusy.value = item.id
     try {
       const response = await userKeysApi.delete(item.id)
-      userKeys.value = response.items || []
+      userKeys.value = userKeys.value.filter(candidate => candidate.id !== response.deleted_id)
       if (editingUserKey.value?.id === item.id) {
         userKeyModal.value = ''
         resetUserKeyForm()
@@ -179,6 +204,7 @@ export function useSettingsUserKeysRuntime(options: SettingsUserKeysRuntimeOptio
   }
 
   function invalidate() {
+    clearNewUserKey()
     userKeysQuery.invalidate()
     userKeysLoaded.value = false
   }

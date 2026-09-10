@@ -1,3 +1,8 @@
+// [INPUT]: accounts/store
+// [OUTPUT]: OpenAI 账号存活巡查：survivalSnapshot、openAISurvivalAPI、runOpenAISurvival
+// [POS]: 后台巡查账号存活，结果供账号页展示。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -9,11 +14,7 @@ import (
 )
 
 func (s *Server) survivalSnapshot() map[string]any {
-	config := s.registerStore.Get()
-	survival := mapValue(config["openai_survival"])
-	if len(survival) == 0 {
-		survival = map[string]any{"enabled": true, "interval_minutes": 60, "concurrency": 4, "refresh_codex_rt": true}
-	}
+	survival := s.openAISurvivalConfig()
 	s.survivalMu.RLock()
 	status := cloneMap(s.survivalStatus)
 	s.survivalMu.RUnlock()
@@ -21,6 +22,50 @@ func (s *Server) survivalSnapshot() map[string]any {
 		status[key] = value
 	}
 	return status
+}
+
+func (s *Server) openAISurvivalAPI(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	switch {
+	case (r.URL.Path == "/api/accounts/survival" || r.URL.Path == "/api/accounts/survival/") && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"survival": s.survivalSnapshot()})
+	case r.URL.Path == "/api/accounts/survival" && r.Method == http.MethodPost:
+		var updates map[string]any
+		if !decodeJSON(w, r, &updates) {
+			return
+		}
+		current := s.openAISurvivalConfig()
+		for key, value := range updates {
+			current[key] = value
+		}
+		if _, err := s.store.UpdateConfig("openai_survival", current); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		select {
+		case s.survivalWake <- struct{}{}:
+		default:
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"survival": current})
+	case r.URL.Path == "/api/accounts/survival/run" && r.Method == http.MethodPost:
+		s.runOpenAISurvival(w)
+	default:
+		writeError(w, http.StatusNotFound, "survival endpoint not found", "not_found")
+	}
+}
+
+func (s *Server) openAISurvivalConfig() map[string]any {
+	defaults := map[string]any{"enabled": true, "interval_minutes": 60, "concurrency": 4, "refresh_codex_rt": true}
+	config, err := s.store.Config()
+	if err != nil {
+		return defaults
+	}
+	for key, value := range mapValue(config["openai_survival"]) {
+		defaults[key] = value
+	}
+	return defaults
 }
 
 func (s *Server) runOpenAISurvival(w http.ResponseWriter) {
@@ -40,7 +85,7 @@ func (s *Server) runOpenAISurvival(w http.ResponseWriter) {
 }
 
 func (s *Server) executeOpenAISurvival() {
-	config := mapValue(s.registerStore.Get()["openai_survival"])
+	config := s.openAISurvivalConfig()
 	concurrency := intValue(config["concurrency"])
 	if concurrency < 1 {
 		concurrency = 1
@@ -98,7 +143,7 @@ func (s *Server) openAISurvivalScheduler() {
 		timer.Stop()
 	}
 	for {
-		config := mapValue(s.registerStore.Get()["openai_survival"])
+		config := s.openAISurvivalConfig()
 		enabled := boolValue(config["enabled"], true)
 		interval := intValue(config["interval_minutes"])
 		if interval < 15 {

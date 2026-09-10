@@ -1,3 +1,12 @@
+// [INPUT]: accounts/protocol
+// [OUTPUT]: 对话：NewOpenAIChat、Complete、Stream、upstreamStatusFromDetail、upstreamErrorFromFrame
+// [POS]: SSE 解析与上游错误语义还原：detail 需映射回 401/429/400。
+//         upstreamErrorFromFrame 是**对话与图片两条链路共用**的还原逻辑（由本包导出给
+//         openai_image.go 的创建流使用），不得各自实现一份——任一链路吞掉它，上游的
+//         审核拦截/凭据失效就会退化成普通字符串错误，被 upstreamStatus 兜底成 502，
+//         而 502 在默认重试码表内，于是请求域错误触发跨账号轮换并冷却健康账号。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package provider
 
 import (
@@ -5,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -98,30 +108,67 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	return onEvent(OpenAIChatEvent{Done: true})
 }
 
+// 上游用 detail 返回错误时必须还原真实语义：账号池依赖 401 标记凭据失效、
+// 依赖 429 做限流冷却，一律记成 400 会让坏账号一直留在池子里继续被选中。
+func upstreamStatusFromDetail(detail string) int {
+	text := strings.ToLower(detail)
+	switch {
+	case strings.Contains(text, "unauthorized"),
+		strings.Contains(text, "invalid_api_key"),
+		strings.Contains(text, "authentication"),
+		strings.Contains(text, "invalid token"):
+		return http.StatusUnauthorized
+	case strings.Contains(text, "rate limit"),
+		strings.Contains(text, "too many requests"),
+		strings.Contains(text, "quota"):
+		return http.StatusTooManyRequests
+	default:
+		return http.StatusBadRequest
+	}
+}
+
 type openAIChatState struct {
 	text string
+}
+
+// upstreamErrorFromFrame 从一帧上游 JSON 里还原错误语义；无错误时返回 nil。
+//
+// detail 是 ChatGPT 后端表达业务错误的主通道，error 对象是另一种形态。两条链路
+// （对话与图片）必须共用这一份还原逻辑：任何一边吞掉它，上游的审核拦截、参数非法
+// 就会退化成普通字符串错误，被 upstreamStatus 兜底成 502——而 502 在默认重试码表内，
+// 于是请求域错误触发跨账号轮换，并给健康账号累计失败、打入 Cooldown。
+func upstreamErrorFromFrame(value any) error {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if detail, ok := object["detail"].(string); ok {
+		return &protocol.UpstreamError{
+			Status:  upstreamStatusFromDetail(detail),
+			Message: detail,
+			Body:    detail,
+		}
+	}
+	rawError, ok := object["error"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	status := http.StatusBadGateway
+	if code := strings.ToLower(firstStringValue(rawError, "code", "type")); strings.Contains(code, "rate") {
+		status = http.StatusTooManyRequests
+	}
+	return &protocol.UpstreamError{
+		Status:  status,
+		Message: firstStringValue(rawError, "message", "error"),
+		Body:    stringValue(rawError["message"]),
+	}
 }
 
 func (s *openAIChatState) event(value any) (OpenAIChatEvent, error) {
 	event := OpenAIChatEvent{}
 	if object, ok := value.(map[string]any); ok {
-		if detail, ok := object["detail"].(string); ok {
-			return OpenAIChatEvent{}, &protocol.UpstreamError{
-				Status:  400,
-				Message: detail,
-				Body:    detail,
-			}
-		}
-		if rawError, ok := object["error"].(map[string]any); ok {
-			status := 502
-			if code := strings.ToLower(firstStringValue(rawError, "code", "type")); strings.Contains(code, "rate") {
-				status = 429
-			}
-			return OpenAIChatEvent{}, &protocol.UpstreamError{
-				Status:  status,
-				Message: firstStringValue(rawError, "message", "error"),
-				Body:    stringValue(rawError["message"]),
-			}
+		if err := upstreamErrorFromFrame(object); err != nil {
+			return OpenAIChatEvent{}, err
 		}
 		if candidate := openAIAssistantText(object); candidate != "" {
 			event.Text = appendDelta(&s.text, candidate)
@@ -193,12 +240,14 @@ func openAIMessageText(value any) string {
 	case []any:
 		parts := make([]string, 0, len(typed))
 		for _, raw := range typed {
+			// 与 protocol.contentText 同一口径：只认"带字符串 text 字段"，
+			// 不列 type 白名单，否则 input_text/output_text 会被静默丢掉。
 			part, ok := raw.(map[string]any)
 			if !ok {
 				continue
 			}
-			if stringValue(part["type"]) == "text" {
-				parts = append(parts, stringValue(part["text"]))
+			if text, ok := part["text"].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
 			}
 		}
 		return strings.Join(parts, "\n")

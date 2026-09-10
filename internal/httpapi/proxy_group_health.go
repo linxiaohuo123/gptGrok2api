@@ -1,3 +1,8 @@
+// [INPUT]: proxy
+// [OUTPUT]: 代理组健康探测：proxyGroupTest、testProxyGroupNodes、testProxyGroupCandidate
+// [POS]: 并发探测 + 结果持久化。节点健康状态会影响运行时可选节点集合。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (

@@ -161,6 +161,62 @@ func TestPoolConcurrencyLimitWaitsForAccountRelease(t *testing.T) {
 	}
 }
 
+func TestPoolFeedbackIgnoresClientCanceled(t *testing.T) {
+	root := t.TempDir()
+	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
+	if err := repository.SaveAccounts([]map[string]any{{"access_token": "one", "pool": "basic", "enabled": true, "status": "正常"}}); err != nil {
+		t.Fatal(err)
+	}
+	p := New(repository)
+	account := Account{Token: "one", Pool: "basic", Fields: map[string]any{"email": "one@example.test"}}
+	p.Feedback(account, 499, context.Canceled)
+	if _, cooled := p.cooldowns[account.Token]; cooled {
+		t.Fatal("client canceled request put account into cooldown")
+	}
+	if p.failures[account.Token] > 0 {
+		t.Fatal("client canceled request recorded as account failure")
+	}
+}
+
+func TestPoolClientModerationAndBadRequestDoesNotPenalizeAccount(t *testing.T) {
+	root := t.TempDir()
+	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
+	stored := map[string]any{
+		"access_token": "safe-token", "pool": "basic", "enabled": true, "status": "正常",
+	}
+	if err := repository.SaveAccounts([]map[string]any{stored}); err != nil {
+		t.Fatal(err)
+	}
+	p := New(repository)
+	account := Account{Token: "safe-token", Pool: "basic", Fields: stored}
+
+	// 模拟违规 prompt 触发 OpenAI 400 审查拦截
+	p.Feedback(account, 400, errors.New("content_policy_violation: Your request was rejected as a result of our safety system"))
+	if _, cooled := p.cooldowns[account.Token]; cooled {
+		t.Fatal("HTTP 400 content moderation error put account into cooldown!")
+	}
+	if p.failures[account.Token] > 0 {
+		t.Fatalf("HTTP 400 recorded as account failure: %d", p.failures[account.Token])
+	}
+	items, err := repository.AccountList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := items[0]["status"]; got != "正常" {
+		t.Fatalf("HTTP 400 marked account abnormal: %#v", items[0])
+	}
+	if got := items[0]["last_error_kind"]; got != "request_error" {
+		t.Fatalf("expected last_error_kind to be request_error, got %#v", got)
+	}
+
+	// 确认该账号依然可以被立即租赁，不受任何惩罚
+	lease, err := p.ReserveMatching(context.Background(), []string{"basic"}, nil, nil)
+	if err != nil {
+		t.Fatalf("account should be immediately leasable after 400: %v", err)
+	}
+	p.Release(lease)
+}
+
 func BenchmarkPoolReserveWithTwoThousandCachedAccounts(b *testing.B) {
 	root := b.TempDir()
 	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))

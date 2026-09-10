@@ -1,9 +1,9 @@
-import { getAuthToken } from './client'
-import type { DebugChatMessage } from './debug'
+import { getAuthToken, handleUnauthorizedResponse } from './client'
+import type { OpenAIV1ChatMessage } from './openaiV1'
 
 export interface ChatStreamInput {
   model: string
-  messages: DebugChatMessage[]
+  messages: OpenAIV1ChatMessage[]
   reasoningEffort?: string
   signal?: AbortSignal
   onDelta?: (delta: string) => void
@@ -123,6 +123,7 @@ export async function streamChatCompletion(input: ChatStreamInput): Promise<Chat
   })
 
   if (!response.ok) {
+    if (response.status === 401) handleUnauthorizedResponse()
     throw new Error(await responseError(response))
   }
 

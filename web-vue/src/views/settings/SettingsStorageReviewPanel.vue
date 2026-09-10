@@ -4,7 +4,10 @@
       <div class="settings-check-grid settings-check-grid--single">
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="imageStorage.enabled">启用 WebDAV 图片存储</Checkbox>
+            <Checkbox
+              v-model="imageStorage.enabled"
+              :disabled="fieldReadOnly('image_storage.enabled')"
+            >启用 WebDAV 图片存储</Checkbox>
           </div>
         </div>
       </div>
@@ -14,6 +17,7 @@
           <GroupedSelectMenu
             v-model="imageStorage.mode"
             :options="imageStorageModeOptions"
+            :disabled="fieldReadOnly('image_storage.mode')"
             selected-indicator="none"
             aria-label="图片存储模式"
             block
@@ -22,25 +26,50 @@
       </FormField>
 
       <FormField label="WebDAV URL">
-        <Input v-model.trim="imageStorage.webdav_url" block placeholder="https://example.com/dav" />
+        <Input
+          v-model.trim="imageStorage.webdav_url"
+          block
+          :disabled="fieldReadOnly('image_storage.webdav_url')"
+          placeholder="https://example.com/dav"
+        />
       </FormField>
 
       <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
         <FormField label="用户名">
-          <Input v-model.trim="imageStorage.webdav_username" block />
+          <Input
+            v-model.trim="imageStorage.webdav_username"
+            block
+            :disabled="fieldReadOnly('image_storage.webdav_username')"
+          />
         </FormField>
 
         <FormField label="密码">
-          <Input v-model="imageStorage.webdav_password" type="password" block />
+          <Input
+            v-model="imageStorage.webdav_password"
+            type="password"
+            block
+            :disabled="fieldReadOnly('image_storage.webdav_password')"
+            :placeholder="imageStorage.has_webdav_password ? '已配置，留空不修改' : '请输入 WebDAV 密码'"
+          />
         </FormField>
       </div>
 
       <FormField label="根路径">
-        <Input v-model.trim="imageStorage.webdav_root_path" block placeholder="chatgpt2api/images" />
+        <Input
+          v-model.trim="imageStorage.webdav_root_path"
+          block
+          :disabled="fieldReadOnly('image_storage.webdav_root_path')"
+          placeholder="chatgpt2api/images"
+        />
       </FormField>
 
       <FormField label="公开访问前缀">
-        <Input v-model.trim="imageStorage.public_base_url" block placeholder="https://cdn.example.com/images" />
+        <Input
+          v-model.trim="imageStorage.public_base_url"
+          block
+          :disabled="fieldReadOnly('image_storage.public_base_url')"
+          placeholder="https://cdn.example.com/images"
+        />
       </FormField>
 
       <div class="flex flex-wrap items-center gap-2">
@@ -65,21 +94,40 @@
       <div class="settings-check-grid settings-check-grid--single">
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="settings.ai_review.enabled">启用 AI 审核</Checkbox>
+            <Checkbox
+              v-model="settings.ai_review.enabled"
+              :disabled="fieldReadOnly('ai_review.enabled')"
+            >启用 AI 审核</Checkbox>
           </div>
         </div>
       </div>
 
       <FormField label="Base URL">
-        <Input v-model.trim="settings.ai_review.base_url" block placeholder="https://api.openai.com" />
+        <Input
+          v-model.trim="settings.ai_review.base_url"
+          block
+          :disabled="fieldReadOnly('ai_review.base_url')"
+          placeholder="https://api.openai.com"
+        />
       </FormField>
 
       <FormField label="API Key">
-        <Input v-model="settings.ai_review.api_key" type="password" block placeholder="sk-..." />
+        <Input
+          v-model="settings.ai_review.api_key"
+          type="password"
+          block
+          :disabled="fieldReadOnly('ai_review.api_key')"
+          :placeholder="settings.ai_review.has_api_key ? '已配置，留空不修改' : 'sk-...'"
+        />
       </FormField>
 
       <FormField label="Model">
-        <Input v-model.trim="settings.ai_review.model" block placeholder="填写审核服务支持的模型 ID" />
+        <Input
+          v-model.trim="settings.ai_review.model"
+          block
+          :disabled="fieldReadOnly('ai_review.model')"
+          placeholder="gpt-5.4-mini"
+        />
       </FormField>
 
       <FormField label="审核提示词">
@@ -87,6 +135,7 @@
           v-model="settings.ai_review.prompt"
           rows="5"
           class="ui-textarea-sm"
+          :disabled="fieldReadOnly('ai_review.prompt')"
           placeholder="判断用户请求是否允许。只回答 ALLOW 或 REJECT。"
         ></textarea>
       </FormField>
@@ -98,12 +147,17 @@
 import { computed } from 'vue'
 import { Button, Checkbox, FormField, FormSection, Input } from 'nanocat-ui'
 import type { ImageStorageTestResult } from '@/api/settings'
-import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
+import { GroupedSelectMenu } from 'nanocat-ui'
 import type { Settings } from '@/types/api'
-import { imageStorageModeOptions } from '@/views/settings/settingsView'
+import {
+  settingsFieldOptions,
+  settingsFieldReadOnly,
+  type SettingsFields,
+} from '@/views/settings/settingsView'
 
 const props = defineProps<{
   settings: Settings
+  fields: SettingsFields
   imageStorageBusy: string
   imageStorageTestResult: ImageStorageTestResult | null
 }>()
@@ -114,6 +168,10 @@ defineEmits<{
 }>()
 
 const imageStorage = computed(() => props.settings.image_storage as NonNullable<Settings['image_storage']>)
+const fieldReadOnly = (path: string) => settingsFieldReadOnly(props.fields, path)
+const imageStorageModeOptions = computed(() => (
+  settingsFieldOptions(props.fields, 'image_storage.mode', imageStorage.value.mode)
+))
 </script>
 
 <style scoped>

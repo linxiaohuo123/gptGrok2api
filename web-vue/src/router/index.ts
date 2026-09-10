@@ -1,122 +1,33 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import type { AuthCapability } from '@/api/auth'
+import { appRoutes, matchedRoutesRequireAuth, resolveLoginRedirect } from '@/router/routes'
 import { useAuthStore } from '@/stores/auth'
 
-const adminHome = { name: 'dashboard' }
-const userHome = { name: 'studio' }
-const userAllowedRoutes = new Set(['studio'])
+function routeCapability(value: unknown): AuthCapability | null {
+  return value === 'admin_console' || value === 'studio' ? value : null
+}
 
 const router = createRouter({
   history: createWebHashHistory(import.meta.env.BASE_URL),
-  routes: [
-    {
-      path: '/login',
-      name: 'login',
-      component: () => import('@/views/Login.vue'),
-      meta: { requiresAuth: false },
-    },
-    {
-      path: '/',
-      component: () => import('@/layouts/AppShell.vue'),
-      meta: { requiresAuth: true },
-      children: [
-        {
-          path: '',
-          name: 'dashboard',
-          component: () => import('@/views/Dashboard.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'accounts',
-          name: 'accounts',
-          component: () => import('@/views/Accounts.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'grok-runtime',
-          name: 'grok-runtime',
-          redirect: { name: 'accounts', query: { platform: 'grok' } },
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'settings',
-          name: 'settings',
-          component: () => import('@/views/Settings.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'proxy',
-          name: 'proxy',
-          component: () => import('@/views/Proxy.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'register',
-          name: 'register',
-          component: () => import('@/views/Register.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'icloud',
-          name: 'icloud',
-          component: () => import('@/views/ICloudPrivacyMail.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'logs',
-          name: 'logs',
-          component: () => import('@/views/Logs.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'monitor',
-          name: 'monitor',
-          component: () => import('@/views/Monitor.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'docs',
-          name: 'docs',
-          component: () => import('@/views/Docs.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'gallery',
-          name: 'gallery',
-          component: () => import('@/views/Gallery.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'debug',
-          name: 'debug',
-          component: () => import('@/views/DebugCenter.vue'),
-          meta: { adminOnly: true },
-        },
-        {
-          path: 'studio',
-          name: 'studio',
-          component: () => import('@/views/Studio.vue'),
-          meta: {},
-        },
-      ],
-    },
-  ],
+  routes: appRoutes,
 })
 
 router.beforeEach(async (to) => {
   const authStore = useAuthStore()
 
   if (to.name === 'login') {
+    const redirect = resolveLoginRedirect(to.query.redirect, authStore.homeRoute)
     if (authStore.isLoggedIn) {
-      return authStore.isUser ? userHome : adminHome
+      return redirect
     }
     const loggedIn = await authStore.checkAuth()
     if (loggedIn) {
-      return authStore.isUser ? userHome : adminHome
+      return redirect
     }
     return true
   }
 
-  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth !== false)
+  const requiresAuth = matchedRoutesRequireAuth(to.matched)
   if (!requiresAuth) {
     return true
   }
@@ -127,13 +38,11 @@ router.beforeEach(async (to) => {
     return { name: 'login', query: { redirect } }
   }
 
-  if (authStore.isUser && !userAllowedRoutes.has(String(to.name || ''))) {
-    return userHome
-  }
-
-  const requiresAdmin = to.matched.some((record) => record.meta.adminOnly)
-  if (requiresAdmin && !authStore.isAdmin) {
-    return userHome
+  const requiredCapability = to.matched
+    .map(record => routeCapability(record.meta.requiredCapability))
+    .find((capability): capability is AuthCapability => capability !== null)
+  if (requiredCapability && !authStore.hasCapability(requiredCapability)) {
+    return authStore.homeRoute
   }
 
   // Fast path: don't block route switch on auth probe.

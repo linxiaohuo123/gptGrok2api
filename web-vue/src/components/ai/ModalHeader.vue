@@ -14,7 +14,7 @@
     </div>
     <div v-if="showClose || $slots.actions" class="modal-header__actions">
       <slot name="actions" />
-      <ModalCloseButton
+      <CloseButton
         v-if="showClose"
         :label="closeText"
         :disabled="closeDisabled"
@@ -25,7 +25,7 @@
 </template>
 
 <script setup lang="ts">
-import ModalCloseButton from './ModalCloseButton.vue'
+import { CloseButton } from 'nanocat-ui'
 
 withDefaults(defineProps<{
   title?: string
@@ -59,6 +59,7 @@ defineEmits<{
 <style scoped>
 .modal-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 12px;

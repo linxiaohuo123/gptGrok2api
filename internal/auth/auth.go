@@ -1,3 +1,8 @@
+// [INPUT]: internal/store 的密钥校验
+// [OUTPUT]: 鉴权判定：New、APIKey、Identity、ValidAPIRequest、ValidAdminRequest
+// [POS]: httpapi 唯一信任的鉴权入口。密钥摘要匹配统一走常数时间比较。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package auth
 
 import (

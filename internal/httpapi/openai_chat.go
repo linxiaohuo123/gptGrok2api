@@ -1,3 +1,8 @@
+// [INPUT]: accounts/model/protocol/provider
+// [OUTPUT]: /v1/chat/completions 的完整与流式实现，含 gpt-image-2 的 chat 兼容通道
+// [POS]: 对话端点的两条出口：一次性补全与 SSE 流式；图片模型在此分流到图片链路。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -21,6 +26,33 @@ func (s *Server) completeOpenAIChat(w http.ResponseWriter, r *http.Request, requ
 		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
 		return
 	}
+
+	key := chatCacheKey(request)
+	if s.chatDedupe != nil {
+		if cached, ok := s.chatDedupe.getCachedResponse(key); ok {
+			cached["id"] = newChatID()
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+	}
+	call, owner := s.chatDedupe.getOrStart(key)
+	if !owner {
+		select {
+		case <-call.done:
+			if call.err != nil {
+				writeOpenAIChatError(w, call.err)
+				return
+			}
+			resp := cloneMap(call.response)
+			resp["id"] = newChatID()
+			writeJSON(w, http.StatusOK, resp)
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+	defer s.chatDedupe.cancelIfInflight(key, call, errors.New("upstream request terminated"))
+
 	responseID := newChatID()
 	excluded := map[string]bool{}
 	var text, thinking string
@@ -35,10 +67,15 @@ func (s *Server) completeOpenAIChat(w http.ResponseWriter, r *http.Request, requ
 		text, thinking, err = s.openAIChat.Complete(r.Context(), lease.Account, request)
 		s.accountPool.Release(lease)
 		if err != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
+			status := upstreamStatus(err)
+			s.accountPool.Feedback(lease.Account, status, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
-			if attempt < s.cfg.ChatMaxRetries {
+			if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
+				s.chatDedupe.finishResponse(key, call, nil, err)
+				return
+			}
+			if s.shouldRetry(status, attempt) {
 				continue
 			}
 			break
@@ -47,6 +84,7 @@ func (s *Server) completeOpenAIChat(w http.ResponseWriter, r *http.Request, requ
 		break
 	}
 	if lastErr != nil {
+		s.chatDedupe.finishResponse(key, call, nil, lastErr)
 		writeOpenAIChatError(w, lastErr)
 		return
 	}
@@ -54,11 +92,13 @@ func (s *Server) completeOpenAIChat(w http.ResponseWriter, r *http.Request, requ
 	if thinking != "" && request.ReasoningEffort != "none" {
 		messagePayload["reasoning_content"] = thinking
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	respPayload := map[string]any{
 		"id": responseID, "object": "chat.completion", "created": time.Now().Unix(), "model": request.Model,
 		"choices": []any{map[string]any{"index": 0, "message": messagePayload, "finish_reason": "stop"}},
 		"usage":   usageFor(message, text, thinking),
-	})
+	}
+	s.chatDedupe.finishResponse(key, call, respPayload, nil)
+	writeJSON(w, http.StatusOK, respPayload)
 }
 
 func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
@@ -67,6 +107,54 @@ func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, reques
 		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
 		return
 	}
+
+	key := chatCacheKey(request)
+	if s.chatDedupe != nil {
+		if chunks, ok := s.chatDedupe.getCachedStream(key); ok {
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("X-Accel-Buffering", "no")
+			flusher, _ := w.(http.Flusher)
+			for _, chunk := range chunks {
+				_, _ = w.Write(chunk)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+	}
+	call, owner := s.chatDedupe.getOrStart(key)
+	if !owner {
+		select {
+		case <-call.done:
+			if call.err != nil {
+				w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("X-Accel-Buffering", "no")
+				writeSSE(w, map[string]any{"error": map[string]any{"message": call.err.Error(), "type": "upstream_error"}})
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("X-Accel-Buffering", "no")
+			flusher, _ := w.(http.Flusher)
+			for _, chunk := range call.chunks {
+				_, _ = w.Write(chunk)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+	defer s.chatDedupe.cancelIfInflight(key, call, errors.New("upstream stream terminated"))
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -76,6 +164,19 @@ func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, reques
 	excluded := map[string]bool{}
 	emitted := false
 	var lastErr error
+	var recordedChunks [][]byte
+
+	recordSSE := func(value any) {
+		raw, _ := json.Marshal(value)
+		chunkBytes := append([]byte("data: "), raw...)
+		chunkBytes = append(chunkBytes, []byte("\n\n")...)
+		_, _ = w.Write(chunkBytes)
+		recordedChunks = append(recordedChunks, chunkBytes)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
 		lease, err := s.accountPool.ReserveMatching(r.Context(), route.PoolCandidates, excluded, isOpenAIAccount)
 		if err != nil {
@@ -88,7 +189,7 @@ func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, reques
 				return nil
 			}
 			if !emitted {
-				writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}})
+				recordSSE(map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}})
 				emitted = true
 			}
 			delta := map[string]any{}
@@ -98,18 +199,20 @@ func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, reques
 			if event.Thinking != "" && request.ReasoningEffort != "none" {
 				delta["reasoning_content"] = event.Thinking
 			}
-			writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": delta}}})
-			if flusher != nil {
-				flusher.Flush()
-			}
+			recordSSE(map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": delta}}})
 			return nil
 		})
 		s.accountPool.Release(lease)
 		if err != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
+			status := upstreamStatus(err)
+			s.accountPool.Feedback(lease.Account, status, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
-			if !emitted && attempt < s.cfg.ChatMaxRetries {
+			if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
+				s.chatDedupe.finishStream(key, call, nil, err)
+				return
+			}
+			if !emitted && s.shouldRetry(status, attempt) {
 				continue
 			}
 			break
@@ -119,13 +222,21 @@ func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, reques
 		break
 	}
 	if lastErr != nil {
+		s.chatDedupe.finishStream(key, call, nil, lastErr)
 		writeSSE(w, map[string]any{"error": map[string]any{"message": lastErr.Error(), "type": "upstream_error"}})
+		return
 	}
 	if !emitted {
-		writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}})
+		recordSSE(map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}})
 	}
-	writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
-	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	recordSSE(map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
+	doneBytes := []byte("data: [DONE]\n\n")
+	_, _ = w.Write(doneBytes)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	recordedChunks = append(recordedChunks, doneBytes)
+	s.chatDedupe.finishStream(key, call, recordedChunks, nil)
 }
 
 func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest) {
@@ -193,6 +304,9 @@ func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request,
 			s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
+			if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
+				return
+			}
 			if s.shouldRetry(upstreamStatus(err), attempt) {
 				continue
 			}
@@ -212,6 +326,9 @@ func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request,
 		item, localURL, resolveErr := s.openAIImage.Resolve(r.Context(), selected, image, "url", s.cfg.ImageDataDir, requestPublicBase(r))
 		if resolveErr != nil {
 			s.accountPool.Feedback(selected, upstreamStatus(resolveErr), resolveErr)
+			if r.Context().Err() != nil || errors.Is(resolveErr, context.Canceled) {
+				return
+			}
 			writeError(w, upstreamStatus(resolveErr), resolveErr.Error(), "upstream_error")
 			return
 		}
@@ -284,6 +401,9 @@ func (s *Server) streamOpenAIImageChat(w http.ResponseWriter, r *http.Request, r
 	writeSSE(w, map[string]any{"id": response["id"], "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": responseContent(response)}}}})
 	writeSSE(w, map[string]any{"id": response["id"], "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
 	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func responseContent(response map[string]any) string {

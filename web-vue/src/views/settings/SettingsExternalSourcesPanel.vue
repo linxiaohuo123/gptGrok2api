@@ -1,5 +1,5 @@
 <template>
-  <PagePanel class="space-y-4">
+  <div class="space-y-4">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
         <p class="ui-section-title">{{ activeTab === 'cpa' ? 'CPA' : 'Sub2API' }}</p>
@@ -39,7 +39,7 @@
                 <p class="mt-1 truncate font-mono text-muted-foreground">{{ pool.base_url }}</p>
               </div>
               <div class="flex gap-1.5">
-                <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="$emit('importCpa', pool)">导入</Button>
+                <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="remoteImportActive" @click="$emit('importCpa', pool)">导入</Button>
                 <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="testingExternalSource === pool.id" @click="$emit('testCpa', pool)">
                   {{ testingExternalSource === pool.id ? '测试中' : '测试' }}
                 </Button>
@@ -83,16 +83,12 @@
                 <p class="mt-1 text-muted-foreground">
                   {{ server.email || '未填邮箱' }} · {{ server.has_api_key ? '已配置 API Key' : '未配置 API Key' }}
                   <span v-if="server.group_id"> · 分组 {{ server.group_id }}</span>
-                  <span> · {{ server.verify_tls !== false ? '验证 TLS' : '跳过 TLS 校验' }}</span>
                 </p>
               </div>
               <div class="flex flex-wrap justify-end gap-1.5">
-                <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="$emit('importSub2api', server)">导入</Button>
+                <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="remoteImportActive" @click="$emit('importSub2api', server)">导入</Button>
                 <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="testingExternalSource === server.id" @click="$emit('testSub2api', server)">
                   {{ testingExternalSource === server.id ? '测试中' : '测试' }}
-                </Button>
-                <Button size="xs" variant="outline" root-class="w-16 justify-center whitespace-nowrap" :disabled="sub2apiGroupsLoadingId === server.id" @click="$emit('loadSub2apiGroups', server)">
-                  {{ sub2apiGroupsLoadingId === server.id ? '读取中' : '读分组' }}
                 </Button>
                 <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="$emit('editSub2api', server)">编辑</Button>
                 <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap text-rose-600" :disabled="savingExternalSource === server.id" @click="$emit('deleteSub2api', server)">
@@ -119,13 +115,12 @@
         </div>
       </div>
     </div>
-  </PagePanel>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { Button } from 'nanocat-ui'
 import type { CPAPool, Sub2APIRemoteGroup, Sub2APIServer } from '@/api/accountImports'
-import PagePanel from '@/components/ai/PagePanel.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
 
 defineProps<{
@@ -135,7 +130,7 @@ defineProps<{
   sub2apiServers: Sub2APIServer[]
   sub2apiLoading: boolean
   sub2apiGroups: Record<string, Sub2APIRemoteGroup[]>
-  sub2apiGroupsLoadingId: string
+  remoteImportActive: boolean
   savingExternalSource: string
   testingExternalSource: string
   externalSourcesLoading: boolean
@@ -151,7 +146,6 @@ defineEmits<{
   createSub2api: []
   importSub2api: [server: Sub2APIServer, groupId?: string]
   testSub2api: [server: Sub2APIServer]
-  loadSub2apiGroups: [server: Sub2APIServer]
   editSub2api: [server: Sub2APIServer]
   deleteSub2api: [server: Sub2APIServer]
 }>()

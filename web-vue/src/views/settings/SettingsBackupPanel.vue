@@ -4,73 +4,104 @@
       <div class="backup-switch-grid">
         <div class="backup-switch-item">
           <div class="backup-switch-control">
-            <Checkbox v-model="backup.enabled">启用定时备份</Checkbox>
+            <Checkbox
+              v-model="backup.enabled"
+              :disabled="fieldReadOnly('backup.enabled')"
+            >启用定时备份</Checkbox>
           </div>
         </div>
         <div class="backup-switch-item">
           <div class="backup-switch-control">
-            <Checkbox v-model="backup.encrypt">启用备份加密</Checkbox>
+            <Checkbox
+              v-model="backup.encrypt"
+              :disabled="fieldReadOnly('backup.encrypt')"
+            >启用备份加密</Checkbox>
           </div>
         </div>
       </div>
 
       <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
         <FormField label="Cloudflare Account ID">
-          <Input v-model.trim="backup.account_id" block />
+          <Input
+            v-model.trim="backup.account_id"
+            block
+            :disabled="fieldReadOnly('backup.account_id')"
+          />
         </FormField>
 
         <FormField label="Bucket 名称">
-          <Input v-model.trim="backup.bucket" block />
+          <Input
+            v-model.trim="backup.bucket"
+            block
+            :disabled="fieldReadOnly('backup.bucket')"
+          />
         </FormField>
       </div>
 
       <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
         <FormField label="Access Key ID">
-          <Input v-model.trim="backup.access_key_id" block />
+          <Input
+            v-model.trim="backup.access_key_id"
+            block
+            :disabled="fieldReadOnly('backup.access_key_id')"
+          />
         </FormField>
 
         <FormField label="Secret Access Key">
-          <Input v-model="backup.secret_access_key" type="password" block />
+          <Input
+            v-model="backup.secret_access_key"
+            type="password"
+            block
+            :disabled="fieldReadOnly('backup.secret_access_key')"
+            :placeholder="backup.has_secret_access_key ? '已配置，留空不修改' : '请输入 Secret Access Key'"
+          />
         </FormField>
       </div>
 
       <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
         <FormField label="备份前缀">
-          <Input v-model.trim="backup.prefix" block placeholder="backups" />
+          <Input
+            v-model.trim="backup.prefix"
+            block
+            :disabled="fieldReadOnly('backup.prefix')"
+            placeholder="backups"
+          />
         </FormField>
 
         <FormField label="保留份数">
-          <Input
-            :model-value="backupRotationKeepField.input.value"
-            type="number"
-            block
-            @update:model-value="backupRotationKeepField.update"
-          />
+          <SettingsNumberInput :field="backupRotationKeepField" />
         </FormField>
       </div>
 
       <FormField label="备份间隔（分钟）">
-        <Input
-          :model-value="backupIntervalMinutesField.input.value"
-          type="number"
-          block
-          @update:model-value="backupIntervalMinutesField.update"
-        />
+        <SettingsNumberInput :field="backupIntervalMinutesField" />
       </FormField>
 
       <FormField label="加密口令">
-        <Input v-model="backup.passphrase" type="password" block placeholder="留空" />
+        <Input
+          v-model="backup.passphrase"
+          type="password"
+          block
+          :disabled="fieldReadOnly('backup.passphrase')"
+          :placeholder="backup.has_passphrase ? '已配置，留空不修改' : '留空'"
+        />
       </FormField>
 
       <div class="space-y-2">
-        <p class="text-xs font-medium text-foreground">备份内容</p>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="text-xs font-medium text-foreground">备份内容</p>
+          <span class="text-xs text-muted-foreground">Application Database 始终包含</span>
+        </div>
         <div class="settings-check-grid">
           <div
             v-for="item in backupIncludeOptions"
             :key="item.value"
             class="settings-check-item"
           >
-            <Checkbox v-model="backup.include[item.value]">{{ item.label }}</Checkbox>
+            <Checkbox
+              v-model="backup.include[item.value]"
+              :disabled="fieldReadOnly(`backup.include.${item.value}`)"
+            >{{ item.label }}</Checkbox>
           </div>
         </div>
       </div>
@@ -140,15 +171,19 @@ import { computed } from 'vue'
 import { Button, Checkbox, FormField, FormSection, Input } from 'nanocat-ui'
 import type { BackupItem, BackupState, BackupTestResult } from '@/api/settings'
 import type { Settings } from '@/types/api'
+import SettingsNumberInput from '@/views/settings/SettingsNumberInput.vue'
 import {
-  backupIncludeOptions,
   formatBytes,
   formatDateTime,
+  settingsBooleanFieldOptions,
+  settingsFieldReadOnly,
+  type SettingsFields,
 } from '@/views/settings/settingsView'
 import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 
 const props = defineProps<{
   settings: Settings
+  fields: SettingsFields
   backupIntervalMinutesField: NumberSettingField
   backupRotationKeepField: NumberSettingField
   backupBusy: string
@@ -168,6 +203,10 @@ defineEmits<{
 
 const visibleBackupItems = computed(() => props.backupItems.slice(0, 5))
 const backup = computed(() => props.settings.backup as NonNullable<Settings['backup']>)
+const fieldReadOnly = (path: string) => settingsFieldReadOnly(props.fields, path)
+const backupIncludeOptions = computed(() => (
+  settingsBooleanFieldOptions(props.fields, 'backup.include.', backup.value.include)
+))
 </script>
 
 <style scoped>

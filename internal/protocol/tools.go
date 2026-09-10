@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（encoding/json、strings）
+// [OUTPUT]: 工具调用：BuildToolSystemPrompt、InjectToolPrompt、ParseToolCalls、ToolNames
+// [POS]: **当前零调用点**——客户端传 tools 会被静默降级成纯文本。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package protocol
 
 import (

@@ -1,3 +1,8 @@
+// [INPUT]: 无内部依赖（os、archive/zip）
+// [OUTPUT]: 备份：backupsAPI、listBackups、runBackup、downloadBackup
+// [POS]: 本地 zip 备份的增删查。备份内容以账号/密钥/配置/队列为主。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -75,7 +80,6 @@ func (s *Server) runBackup(w http.ResponseWriter) {
 		{s.cfg.AccountsPath, "data/accounts.json"},
 		{s.cfg.AuthKeysPath, "data/auth_keys.json"},
 		{s.cfg.ConfigPath, "config.json"},
-		{s.cfg.OAuthPath, "data/oauth_accounts.json.enc"},
 		{s.cfg.QueuePath, "data/tasks.json"},
 		{s.tagsPath(), "data/image_tags.json"},
 	}

@@ -1,3 +1,8 @@
+// [INPUT]: model/protocol/provider
+// [OUTPUT]: Anthropic /v1/messages 与消息流写出
+// [POS]: Anthropic 协议的适配层，把内部 chat 结果翻译成 Messages 响应。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -39,7 +44,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec, ok := model.Find(s.catalog, request.Model)
-	if !ok || spec.Capability&model.Chat == 0 && spec.Capability&model.ConsoleChat == 0 {
+	if !ok || spec.Capability&model.Chat == 0 {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
 	}
@@ -52,7 +57,12 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		content := raw["content"]
 		messages = append(messages, protocol.Message{Role: role, Content: content})
 	}
+	if err := s.checkSensitiveWords(protocol.ExtractMessage(messages)); err != nil {
+		writeSensitiveWordError(w)
+		return
+	}
 	chat := protocol.ChatRequest{Model: request.Model, Messages: messages, Stream: false, Temperature: request.Temperature, TopP: request.TopP, MaxTokens: request.MaxTokens}
+	chat = s.applyGlobalSystemPrompt(chat)
 	chat.Tools = convertAnthropicTools(request.Tools)
 	chat.ToolChoice = convertAnthropicChoice(request.ToolChoice)
 	if request.Thinking != nil && strings.EqualFold(stringValue(request.Thinking["type"]), "disabled") {
@@ -61,18 +71,15 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	if request.Stream {
 		chat.Stream = true
 	}
-	if spec.Capability&model.ConsoleChat != 0 {
-		s.consoleChatCompletions(w, r, chat)
-		return
-	}
+	route, _ := model.ResolveChat(request.Model)
 	if request.Stream {
 		recorder := &responseCapture{header: make(http.Header)}
-		s.completeChat(recorder, r, chat, model.ChatRoute{Mode: "fast", PoolCandidates: []string{"basic", "super", "heavy"}})
+		s.completeOpenAIChat(recorder, r, chat, route)
 		s.writeAnthropicStream(w, recorder, request.Model)
 		return
 	}
 	recorder := &responseCapture{header: make(http.Header)}
-	s.completeChat(recorder, r, chat, model.ChatRoute{Mode: "fast", PoolCandidates: []string{"basic", "super", "heavy"}})
+	s.completeOpenAIChat(recorder, r, chat, route)
 	s.writeAnthropicResponse(w, recorder, request.Model)
 }
 
@@ -141,6 +148,9 @@ func (s *Server) writeAnthropicStream(w http.ResponseWriter, recorder *responseC
 	writeEventSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": map[string]any{"output_tokens": chatUsage(chat, "completion_tokens")}})
 	writeEventSSE(w, "message_stop", map[string]any{"type": "message_stop"})
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func anthropicText(value any) string {

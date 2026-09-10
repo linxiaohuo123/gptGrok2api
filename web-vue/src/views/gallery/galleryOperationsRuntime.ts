@@ -1,15 +1,12 @@
-import { reactive, ref, type Ref } from 'vue'
+import { ref, type Ref } from 'vue'
 
 import { galleryApi, type GalleryFile, type ImageStorageStats } from '@/api/gallery'
 import { saveBlob } from '@/lib/downloads'
-import {
-  formatCleanupExpiredMessage,
-  formatCleanupTargetMessage,
-  formatCompressStorageMessage,
-  formatMb,
-} from '@/views/gallery/galleryView'
+import { errorMessage } from '@/lib/errorMessage'
+import { formatMb } from '@/views/gallery/galleryView'
 import type { PageRuntime } from '@/composables/usePageRuntime'
 import { usePageQuery } from '@/composables/usePageQuery'
+import { useOperationProgressRuntime } from '@/composables/useOperationProgressRuntime'
 
 type ConfirmDialog = {
   ask: (options: {
@@ -46,17 +43,9 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
   const storageActionError = ref('')
   const targetFreeMb = ref('500')
   const batchBusy = ref(false)
-  const operationProgress = reactive({
-    open: false,
-    title: '',
-    subtitle: '',
-    total: 0,
-    current: 0,
-    statusLabel: '已处理',
-    message: '',
-    error: '',
-    busy: false,
-  })
+  const genboxPushBusyPath = ref<string | null>(null)
+  const progressRuntime = useOperationProgressRuntime()
+  const operationProgress = progressRuntime.state
 
   const storageStatsQuery = usePageQuery({
     runtime: options.runtime,
@@ -64,23 +53,6 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     error: storageActionError,
     errorMessage: '刷新存储统计失败',
   })
-
-  function resetProgress(config: {
-    title: string
-    subtitle: string
-    total: number
-    message: string
-  }) {
-    operationProgress.open = true
-    operationProgress.title = config.title
-    operationProgress.subtitle = config.subtitle
-    operationProgress.total = config.total
-    operationProgress.current = 0
-    operationProgress.statusLabel = '已提交'
-    operationProgress.message = config.message
-    operationProgress.error = ''
-    operationProgress.busy = true
-  }
 
   async function refreshStorageStats(optionsOverride: { lock?: boolean; silent?: boolean } = {}) {
     if (!options.runtime.isActive.value) return
@@ -130,7 +102,7 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     storageActionError.value = ''
     try {
       const result = await galleryApi.compressStorage()
-      storageActionMessage.value = formatCompressStorageMessage(result)
+      storageActionMessage.value = result.message
       options.toast.success(storageActionMessage.value, '压缩完成')
       await Promise.all([refreshStorageStats({ lock: false }), options.loadGallery()])
     } catch (error: any) {
@@ -144,7 +116,7 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
   async function handleCleanupExpired() {
     const confirmed = await options.confirmDialog.ask({
       title: '清理过期图片',
-      message: '将删除图库中已过期的图片记录和文件。此操作不可恢复，确定继续吗？',
+      message: '将清理已过期图片的本地副本；仍有 WebDAV 副本的图库记录会保留。此操作不可恢复，确定继续吗？',
       confirmText: '清理过期',
       cancelText: '取消',
     })
@@ -155,7 +127,7 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     storageActionError.value = ''
     try {
       const result = await galleryApi.cleanupExpired()
-      storageActionMessage.value = formatCleanupExpiredMessage(result)
+      storageActionMessage.value = result.message
       options.toast.success(storageActionMessage.value, '清理完成')
       await Promise.all([refreshStorageStats({ lock: false }), options.loadGallery()])
     } catch (error: any) {
@@ -190,7 +162,7 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     storageActionError.value = ''
     try {
       const result = await galleryApi.cleanupToTarget(normalizedTarget, dryRun)
-      storageActionMessage.value = formatCleanupTargetMessage(result, { dryRun, normalizedTarget })
+      storageActionMessage.value = result.message
       if (dryRun) {
         options.toast.success(storageActionMessage.value, '预估完成')
         await refreshStorageStats({ lock: false })
@@ -206,81 +178,61 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     }
   }
 
-  async function handleDelete(file: GalleryFile) {
+  async function deleteImages(paths: string[], file: GalleryFile | null = null) {
+    if (paths.length === 0) return
+    const isBatch = paths.length > 1
     const confirmed = await options.confirmDialog.ask({
-      title: '确认删除',
-      message: `确定要删除 ${file.filename} 吗？此操作不可恢复。`,
+      title: isBatch ? '批量删除图片' : '删除图片',
+      message: file
+        ? `确定要删除 ${file.filename} 吗？此操作不可恢复。`
+        : `确定要删除已选择的 ${paths.length} 张图片吗？此操作不可恢复。`,
       confirmText: '删除',
       cancelText: '取消',
     })
     if (!confirmed) return
 
     batchBusy.value = true
-    resetProgress({
-      title: '删除图片',
-      subtitle: file.filename,
-      total: 1,
-      message: '正在提交删除请求...',
+    await progressRuntime.start({
+      title: isBatch ? '批量删除图片' : '删除图片',
+      subtitle: file?.filename || `已选择 ${paths.length} 张`,
+      total: paths.length,
+      message: isBatch ? '正在提交批量删除请求...' : '正在提交删除请求...',
     })
     try {
-      await galleryApi.deleteFile(file.path)
-      operationProgress.current = 1
-      operationProgress.statusLabel = '已处理'
-      operationProgress.message = '删除完成，正在刷新列表...'
-      options.selectedPaths.value.delete(file.path)
-      options.selectedPaths.value = new Set(options.selectedPaths.value)
-      options.closePreviewIfPath(file.path)
-      options.closeTagEditorIfPath(file.path)
-      if (options.files.value.length === 1 && options.currentPage.value > 1) {
+      const result = await galleryApi.deleteFiles(paths)
+      const removed = Number(result.removed || 0)
+      progressRuntime.record({ label: '刷新列表', message: '删除完成，正在刷新列表...' })
+      if (file) {
+        options.selectedPaths.value.delete(file.path)
+        options.selectedPaths.value = new Set(options.selectedPaths.value)
+      } else {
+        options.clearSelection()
+      }
+      paths.forEach((path) => {
+        options.closePreviewIfPath(path)
+        options.closeTagEditorIfPath(path)
+      })
+      if (paths.length === 1 && options.files.value.length === 1 && options.currentPage.value > 1) {
         options.currentPage.value -= 1
       } else {
         await options.loadGallery()
       }
-      options.toast.success(`已删除 ${file.filename}`, '删除成功')
-      operationProgress.message = '图片已删除'
+      progressRuntime.succeed(isBatch ? `已删除 ${removed} 张图片` : '图片已删除', removed)
     } catch (error: any) {
-      operationProgress.error = error?.message || '删除图片失败'
-      options.toast.error(operationProgress.error, '删除失败')
+      const message = error?.message || (isBatch ? '批量删除失败' : '删除图片失败')
+      progressRuntime.fail(message)
     } finally {
       batchBusy.value = false
-      operationProgress.busy = false
     }
+  }
+
+  function handleDelete(file: GalleryFile) {
+    return deleteImages([file.path], file)
   }
 
   async function handleDeleteSelected() {
     const paths = Array.from(options.selectedPaths.value)
-    if (!paths.length) return
-    const confirmed = await options.confirmDialog.ask({
-      title: '批量删除',
-      message: `确定要删除已选择的 ${paths.length} 张图片吗？此操作不可恢复。`,
-      confirmText: '删除',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    batchBusy.value = true
-    resetProgress({
-      title: '批量删除图片',
-      subtitle: `已选择 ${paths.length} 张`,
-      total: paths.length,
-      message: '正在提交批量删除请求...',
-    })
-    try {
-      const result = await galleryApi.deleteFiles(paths)
-      operationProgress.current = Number(result.removed || 0)
-      operationProgress.statusLabel = '已处理'
-      operationProgress.message = '删除完成，正在刷新列表...'
-      options.clearSelection()
-      await options.loadGallery()
-      options.toast.success(`已删除 ${Number(result.removed || 0)} 张图片。`, '删除成功')
-      operationProgress.message = `已删除 ${Number(result.removed || 0)} 张图片`
-    } catch (error: any) {
-      operationProgress.error = error?.message || '批量删除失败'
-      options.toast.error(operationProgress.error, '删除失败')
-    } finally {
-      batchBusy.value = false
-      operationProgress.busy = false
-    }
+    return deleteImages(paths)
   }
 
   async function handleBatchDownload() {
@@ -288,7 +240,7 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     if (!paths.length) return
 
     batchBusy.value = true
-    resetProgress({
+    await progressRuntime.start({
       title: '批量下载图片',
       subtitle: `已选择 ${paths.length} 张`,
       total: paths.length,
@@ -296,18 +248,28 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     })
     try {
       const blob = await galleryApi.downloadZip(paths)
-      operationProgress.current = paths.length
-      operationProgress.statusLabel = '已处理'
-      operationProgress.message = 'ZIP 已生成，正在启动下载...'
+      progressRuntime.record({ label: '启动下载', message: 'ZIP 已生成，正在启动下载...' })
       saveBlob(blob, `images_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.zip`)
-      options.toast.success(`已打包 ${paths.length} 张图片。`, '下载已开始')
-      operationProgress.message = `已打包 ${paths.length} 张图片`
+      progressRuntime.succeed(`已打包 ${paths.length} 张图片`, paths.length)
     } catch (error: any) {
-      operationProgress.error = error?.message || '批量下载失败'
-      options.toast.error(operationProgress.error, '下载失败')
+      const message = error?.message || '批量下载失败'
+      progressRuntime.fail(message)
     } finally {
       batchBusy.value = false
-      operationProgress.busy = false
+    }
+  }
+
+  async function handleGenBoxPush(file: GalleryFile) {
+    if (genboxPushBusyPath.value) return
+    genboxPushBusyPath.value = file.path
+    try {
+      const result = await galleryApi.pushToGenBox(file.path)
+      options.toast.success(result.label, 'Push 成功')
+      await options.loadGallery()
+    } catch (error) {
+      options.toast.error(errorMessage(error, '推送到 GenBox 失败'), 'Push 失败')
+    } finally {
+      genboxPushBusyPath.value = null
     }
   }
 
@@ -318,12 +280,14 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
 
   return {
     batchBusy,
+    genboxPushBusyPath,
     isStorageModalOpen,
     isStorageBusy,
     storageActionMessage,
     storageActionError,
     targetFreeMb,
     operationProgress,
+    closeOperationProgress: progressRuntime.close,
     refreshStorageStats,
     openStorageModal,
     closeStorageModal,
@@ -333,6 +297,7 @@ export function useGalleryOperationsRuntime(options: GalleryOperationsRuntimeOpt
     handleDelete,
     handleDeleteSelected,
     handleBatchDownload,
+    handleGenBoxPush,
     deactivate,
   }
 }

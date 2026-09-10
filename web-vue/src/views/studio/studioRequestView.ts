@@ -1,5 +1,5 @@
 import { streamChatCompletion } from '@/api/chatStream'
-import { debugApi, type DebugChatContentPart, type DebugChatMessage } from '@/api/debug'
+import { openaiV1Api, type OpenAIV1ChatContentPart, type OpenAIV1ChatMessage } from '@/api/openaiV1'
 import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_QUALITY,
@@ -32,7 +32,7 @@ export type StudioImageTaskInput = {
   imageForm: StudioImageForm
 }
 
-export function buildStudioChatMessages(conversation: StudioConversation, currentAssistantId: string): DebugChatMessage[] {
+export function buildStudioChatMessages(conversation: StudioConversation, currentAssistantId: string): OpenAIV1ChatMessage[] {
   return conversation.messages
     .filter((message) => {
       if (message.id === currentAssistantId) return false
@@ -41,7 +41,7 @@ export function buildStudioChatMessages(conversation: StudioConversation, curren
       if (message.role === 'assistant' && message.mode !== 'chat' && message.mode !== 'search') return false
       return true
     })
-    .map((message): DebugChatMessage => ({
+    .map((message): OpenAIV1ChatMessage => ({
       role: message.role === 'assistant' ? 'assistant' : 'user',
       content: buildStudioChatContextContent(message),
     }))
@@ -50,12 +50,14 @@ export function buildStudioChatMessages(conversation: StudioConversation, curren
 
 export function studioModeRequestErrorFallback(mode: StudioComposeMode) {
   if (mode === 'image') return '图片生成失败'
+  if (mode === 'file') return '文件任务提交失败'
   if (mode === 'search') return '搜索请求失败'
   return '对话请求失败'
 }
 
 export function studioModeRetryErrorFallback(mode: StudioComposeMode) {
   if (mode === 'image') return '图片重新生成失败'
+  if (mode === 'file') return '文件任务重新提交失败'
   if (mode === 'search') return '搜索重新请求失败'
   return '对话重新生成失败'
 }
@@ -82,7 +84,7 @@ export async function streamStudioChatReply(input: {
 }
 
 export async function runStudioSearchRequest(prompt: string, ownerId: string): Promise<StudioSearchReply> {
-  const result = await debugApi.search(prompt)
+  const result = await openaiV1Api.search(prompt)
   const sources = normalizeStudioSearchSources(result.sources)
   const imageGroups = normalizeStudioSearchImageGroups(result.image_groups) || extractStudioSearchImageGroupsFromText(result.answer)
   return {
@@ -116,11 +118,11 @@ export async function createStudioImageTask(input: StudioImageTaskInput): Promis
     })
 }
 
-function buildStudioChatContextContent(message: StudioMessage): DebugChatMessage['content'] {
+function buildStudioChatContextContent(message: StudioMessage): OpenAIV1ChatMessage['content'] {
   const text = buildStudioChatContextText(message)
   if (!hasChatVisionReferences(message)) return text
 
-  const parts: DebugChatContentPart[] = []
+  const parts: OpenAIV1ChatContentPart[] = []
   if (text.trim()) parts.push({ type: 'text', text })
   for (const image of message.referenceImages || []) {
     if (!image.dataUrl) continue
@@ -132,6 +134,7 @@ function buildStudioChatContextContent(message: StudioMessage): DebugChatMessage
 function buildStudioChatContextText(message: StudioMessage) {
   if (message.role === 'user' && message.mode === 'image') return `画图请求：${message.content}`
   if (message.role === 'user' && message.mode === 'search') return `搜索请求：${message.content}`
+  if (message.role === 'user' && message.mode === 'file') return `${message.fileKind === 'psd' ? 'PSD' : 'PPT'} 文件请求：${message.content}`
   return message.content
 }
 

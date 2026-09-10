@@ -1,3 +1,8 @@
+// [INPUT]: 仅标准库（crypto/aes、encoding/json）
+// [OUTPUT]: 加密归档：NewStore、Ensure、Summary、AuthJSON
+// [POS]: Codex Agent Identity 的独立加密落盘。私钥不进普通账号列表。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package agentidentity
 
 import (

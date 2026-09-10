@@ -1,3 +1,8 @@
+// [INPUT]: 无内部依赖（os、encoding/json）
+// [OUTPUT]: 第三方账号源存储：externalManager、job 状态机（mutateJob/jobSnapshot/updateJob/appendJobError/finishJob）
+// [POS]: 第三方账号源的持久化与导入 job。**job map 只能经本文件提供的入口访问**。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -196,11 +201,49 @@ func jobFor(total int) map[string]any {
 	return map[string]any{"job_id": externalID("job"), "status": "pending", "created_at": now, "updated_at": now, "total": total, "completed": 0, "added": 0, "skipped": 0, "refreshed": 0, "failed": 0, "errors": []any{}}
 }
 
-func updateJob(job map[string]any, updates map[string]any) {
-	for key, value := range updates {
-		job[key] = value
+// ── 导入任务状态 ──────────────────────────────────────────────
+// job map 由后台导入 goroutine 持续改写，同时被 HTTP 响应和配置文件持久化读出，
+// 三处都是 JSON 序列化。活 map 因此只能经下面两个入口访问：
+// 改写走 mutateJob，对外一律交快照，绝不把活 map 递给序列化。
+func (s *Server) mutateJob(job map[string]any, fn func(map[string]any)) {
+	s.importJobMu.Lock()
+	defer s.importJobMu.Unlock()
+	fn(job)
+}
+
+func (s *Server) jobSnapshot(job map[string]any) map[string]any {
+	s.importJobMu.Lock()
+	defer s.importJobMu.Unlock()
+	snapshot := cloneMap(job)
+	if errors, ok := job["errors"].([]any); ok {
+		snapshot["errors"] = append([]any(nil), errors...)
 	}
-	job["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	return snapshot
+}
+
+// finishJob 在同一临界区内读计数、写终态：分成两步做会读到别人写了一半的状态。
+// importJobTerminalStatus：一条都没导进来才算失败，其余都是完成。
+func importJobTerminalStatus(current map[string]any) string {
+	if intValue(current["added"]) == 0 && intValue(current["skipped"]) == 0 {
+		return "failed"
+	}
+	return "completed"
+}
+
+func (s *Server) finishJob(job map[string]any, pick func(map[string]any) string) {
+	s.mutateJob(job, func(current map[string]any) {
+		current["status"] = pick(current)
+		current["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	})
+}
+
+func (s *Server) updateJob(job map[string]any, updates map[string]any) {
+	s.mutateJob(job, func(current map[string]any) {
+		for key, value := range updates {
+			current[key] = value
+		}
+		current["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	})
 }
 
 func intValue(value any) int {
@@ -236,11 +279,13 @@ func intValue(value any) int {
 	return 0
 }
 
-func appendJobError(job map[string]any, name, message string) {
-	errors, _ := job["errors"].([]any)
-	errors = append(errors, map[string]any{"name": name, "error": message})
-	job["errors"] = errors
-	job["failed"] = len(errors)
+func (s *Server) appendJobError(job map[string]any, name, message string) {
+	s.mutateJob(job, func(current map[string]any) {
+		errors, _ := current["errors"].([]any)
+		errors = append(errors, map[string]any{"name": name, "error": message})
+		current["errors"] = errors
+		current["failed"] = len(errors)
+	})
 }
 
 func remoteClient(verifyTLS bool) *http.Client {

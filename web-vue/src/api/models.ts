@@ -1,34 +1,28 @@
 import apiClient from './client'
 
-export interface OpenAIModel {
-  id: string
-  object?: string
-  created?: number
-  owned_by?: string
-  root?: string
-  parent?: string | null
-}
-
-export interface ModelListResponse {
-  object?: string
-  data: OpenAIModel[]
-}
-
 export interface ModelCatalogResponse {
-  object?: 'model_catalog' | string
+  object: 'model_catalog'
+  schema_version: 1
+  generated_at: string
+  revision: string
   chat_models: string[]
   image_models: string[]
-  image_edit_models?: string[]
-  video_models?: string[]
-  all_models?: string[]
-  source?: {
-    chat?: string
-    image?: string
+  all_models: string[]
+  defaults: {
+    chat_model: string
+    image_model: string
   }
-  openai_models_endpoint?: string
+  capabilities: {
+    image_upscale: boolean
+    high_resolution_image_models: string[]
+  }
+  source: {
+    chat: 'config' | 'accounts' | 'fallback'
+    image: 'config' | 'accounts' | 'fallback'
+  }
+  openai_models_endpoint: '/v1/models'
 }
 
 export const modelsApi = {
   catalog: () => apiClient.get<never, ModelCatalogResponse>('/api/model-catalog'),
-  list: () => apiClient.get<never, ModelListResponse>('/v1/models'),
 }

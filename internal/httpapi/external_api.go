@@ -1,3 +1,8 @@
+// [INPUT]: 无内部依赖（net/http）
+// [OUTPUT]: CPA / Sub2API 的 HTTP 端点与导入执行
+// [POS]: 第三方账号源的对外接口；导入在后台 goroutine 执行，状态经 job 快照对外暴露。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package httpapi
 
 import (
@@ -99,12 +104,12 @@ func (s *Server) cpaPoolAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			job := jobFor(len(names))
-			if err := s.updateCPAJob(id, job); err != nil {
+			if err := s.updateCPAJob(id, s.jobSnapshot(job)); err != nil {
 				writeError(w, 500, err.Error(), "server_error")
 				return
 			}
 			go s.runCPAImport(item, names, job)
-			writeJSON(w, 200, map[string]any{"import_job": job})
+			writeJSON(w, 200, map[string]any{"import_job": s.jobSnapshot(job)})
 			return
 		}
 		writeError(w, 405, "method not allowed", "invalid_request_error")
@@ -193,31 +198,33 @@ func (s *Server) cpaRemoteFiles(pool externalCPAPool) ([]map[string]any, error) 
 }
 
 func (s *Server) runCPAImport(pool externalCPAPool, names []string, job map[string]any) {
-	update := func(values map[string]any) { updateJob(job, values); _ = s.updateCPAJob(pool.ID, job) }
+	update := func(values map[string]any) {
+		s.updateJob(job, values)
+		_ = s.updateCPAJob(pool.ID, s.jobSnapshot(job))
+	}
 	update(map[string]any{"status": "running"})
 	for _, name := range names {
 		payload, _, err := remoteJSON(remoteClient(true), http.MethodGet, pool.BaseURL+"/v0/management/auth-files/download", map[string]string{"Authorization": "Bearer " + pool.SecretKey, "Accept": "application/json"}, url.Values{"name": []string{name}}, nil)
 		if err != nil {
-			appendJobError(job, name, err.Error())
+			s.appendJobError(job, name, err.Error())
 		} else if token := stringValue(payload["access_token"]); token != "" {
 			added, skipped, _, addErr := s.store.AddAccounts([]string{token}, nil)
 			if addErr != nil {
-				appendJobError(job, name, addErr.Error())
+				s.appendJobError(job, name, addErr.Error())
 			} else {
-				job["added"] = intValue(job["added"]) + added
-				job["skipped"] = intValue(job["skipped"]) + skipped
+				s.mutateJob(job, func(current map[string]any) {
+					current["added"] = intValue(current["added"]) + added
+					current["skipped"] = intValue(current["skipped"]) + skipped
+				})
 			}
 		} else {
-			appendJobError(job, name, "missing access_token")
+			s.appendJobError(job, name, "missing access_token")
 		}
-		job["completed"] = intValue(job["completed"]) + 1
+		s.mutateJob(job, func(current map[string]any) { current["completed"] = intValue(current["completed"]) + 1 })
 		update(map[string]any{})
 	}
-	status := "completed"
-	if intValue(job["added"]) == 0 && intValue(job["skipped"]) == 0 {
-		status = "failed"
-	}
-	update(map[string]any{"status": status})
+	s.finishJob(job, importJobTerminalStatus)
+	_ = s.updateCPAJob(pool.ID, s.jobSnapshot(job))
 }
 
 func (s *Server) sub2APIServersAPI(w http.ResponseWriter, r *http.Request) {
@@ -332,12 +339,12 @@ func (s *Server) sub2APIServerAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			job := jobFor(len(ids))
-			if err := s.updateSubJob(id, job); err != nil {
+			if err := s.updateSubJob(id, s.jobSnapshot(job)); err != nil {
 				writeError(w, 500, err.Error(), "server_error")
 				return
 			}
 			go s.runSubImport(item, ids, job)
-			writeJSON(w, 200, map[string]any{"import_job": job})
+			writeJSON(w, 200, map[string]any{"import_job": s.jobSnapshot(job)})
 			return
 		}
 		writeError(w, 405, "method not allowed", "invalid_request_error")
@@ -479,13 +486,16 @@ func remoteSubAccounts(item externalSubServer) ([]map[string]any, error) {
 }
 
 func (s *Server) runSubImport(item externalSubServer, ids []string, job map[string]any) {
-	update := func(values map[string]any) { updateJob(job, values); _ = s.updateSubJob(item.ID, job) }
+	update := func(values map[string]any) {
+		s.updateJob(job, values)
+		_ = s.updateSubJob(item.ID, s.jobSnapshot(job))
+	}
 	update(map[string]any{"status": "running"})
 	headers, err := subHeaders(item)
 	if err != nil {
 		for _, id := range ids {
-			appendJobError(job, id, err.Error())
-			job["completed"] = intValue(job["completed"]) + 1
+			s.appendJobError(job, id, err.Error())
+			s.mutateJob(job, func(current map[string]any) { current["completed"] = intValue(current["completed"]) + 1 })
 		}
 		update(map[string]any{"status": "failed"})
 		return
@@ -498,23 +508,22 @@ func (s *Server) runSubImport(item externalSubServer, ids []string, job map[stri
 			token = recursiveString(payload, "access_token", "accessToken", "token")
 		}
 		if fetchErr != nil {
-			appendJobError(job, id, fetchErr.Error())
+			s.appendJobError(job, id, fetchErr.Error())
 		} else if token == "" {
-			appendJobError(job, id, "data export missing access_token")
+			s.appendJobError(job, id, "data export missing access_token")
 		} else if added, skipped, _, addErr := s.store.AddAccounts([]string{token}, nil); addErr != nil {
-			appendJobError(job, id, addErr.Error())
+			s.appendJobError(job, id, addErr.Error())
 		} else {
-			job["added"] = intValue(job["added"]) + added
-			job["skipped"] = intValue(job["skipped"]) + skipped
+			s.mutateJob(job, func(current map[string]any) {
+				current["added"] = intValue(current["added"]) + added
+				current["skipped"] = intValue(current["skipped"]) + skipped
+			})
 		}
-		job["completed"] = intValue(job["completed"]) + 1
+		s.mutateJob(job, func(current map[string]any) { current["completed"] = intValue(current["completed"]) + 1 })
 		update(map[string]any{})
 	}
-	status := "completed"
-	if intValue(job["added"]) == 0 && intValue(job["skipped"]) == 0 {
-		status = "failed"
-	}
-	update(map[string]any{"status": status})
+	s.finishJob(job, importJobTerminalStatus)
+	_ = s.updateSubJob(item.ID, s.jobSnapshot(job))
 }
 
 func resourcePath(path, prefix string) (string, string) {

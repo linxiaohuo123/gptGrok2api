@@ -1,3 +1,9 @@
+// [INPUT]: 外部依赖 github.com/redis/go-redis/v9；与主程序仅通过 HTTP + Redis 交互
+// [OUTPUT]: 主流程：配置、鉴权、入队/等待、worker 消费、调度器租约、监控上报
+// [POS]: 独立 module 的主入口。对上游做削峰，把并发图片请求压成单条 Redis 队列。
+//         出网客户端与 SSRF 防护在 client.go，两类 client（后端 / 抓取用户 URL）不得互换。
+// [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 package main
 
 import (
@@ -82,16 +88,19 @@ type reservation struct {
 }
 
 type server struct {
-	cfg       config
-	rdb       *redis.Client
-	client    *http.Client
-	started   time.Time
-	accepted  atomic.Uint64
-	completed atomic.Uint64
-	failed    atomic.Uint64
-	active    atomic.Int64
-	wg        sync.WaitGroup
-	waiters   sync.Map
+	cfg    config
+	rdb    *redis.Client
+	client *http.Client
+	// fetchClient 只用于抓取用户提交的远端 image_url，与 client 分开构造：
+	// 它带短超时与私网拦截，绝不能拿去调调度器（那样会把长生图请求腰斩）。
+	fetchClient *http.Client
+	started     time.Time
+	accepted    atomic.Uint64
+	completed   atomic.Uint64
+	failed      atomic.Uint64
+	active      atomic.Int64
+	wg          sync.WaitGroup
+	waiters     sync.Map
 }
 
 func env(name, fallback string) string {
@@ -228,12 +237,16 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 func (s *server) enqueue(w http.ResponseWriter, r *http.Request, raw []byte) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	// 准入判据必须是「积压 + 在飞」。只看 LLen 是失效的：worker 一旦空闲就
+	// BLPOP 把任务取走，于是满载（worker 全忙于一次长生图）时队列长度恒为 0，
+	// QueueCapacity 永远触发不了——这道闸门形同虚设，而每个被放行的请求
+	// 都会占住一个 handler goroutine、一条连接和一份含 base64 图片的 Redis 记录。
 	length, err := s.rdb.LLen(ctx, queueKey).Result()
 	if err != nil {
 		writeJSON(w, 503, map[string]string{"error": "queue unavailable"})
 		return
 	}
-	if length >= s.cfg.QueueCapacity {
+	if length+s.active.Load() >= s.cfg.QueueCapacity {
 		writeJSON(w, 429, map[string]string{"error": "task queue is full"})
 		return
 	}
@@ -383,25 +396,18 @@ func (s *server) submitJSONEditRaw(w http.ResponseWriter, r *http.Request, raw [
 			return
 		}
 		if strings.HasPrefix(strings.ToLower(dataURL), "http://") || strings.HasPrefix(strings.ToLower(dataURL), "https://") {
-			resp, fetchErr := http.Get(dataURL)
-			if fetchErr != nil || resp.StatusCode >= 400 {
-				if resp != nil {
-					resp.Body.Close()
-				}
+			// 走受限 client：短超时 + 私网拦截。原先这里用 http.Get（DefaultClient，
+			// 无超时、无校验），既能被用来探测内网与云元数据端点，又能让一个只
+			// accept 不回包的地址永久挂住 handler goroutine。
+			fetched, contentType, fetchErr := fetchRemoteImage(r.Context(), s.fetchClient, dataURL)
+			if fetchErr != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid image URL"})
 				return
 			}
-			b, readErr := io.ReadAll(io.LimitReader(resp.Body, 50<<20+1))
-			resp.Body.Close()
-			if readErr != nil || len(b) > 50<<20 {
-				writeJSON(w, 400, map[string]string{"error": "invalid image URL"})
-				return
-			}
-			contentType := resp.Header.Get("Content-Type")
 			if contentType == "" {
 				contentType = "image/png"
 			}
-			dataURL = "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(b)
+			dataURL = "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(fetched)
 		}
 		header, encoded, ok := strings.Cut(dataURL, ",")
 		if !ok || !strings.HasPrefix(strings.ToLower(header), "data:") || !strings.Contains(strings.ToLower(header), ";base64") {
@@ -535,7 +541,14 @@ func (s *server) runTask(parent context.Context, id string) {
 			response, statusCode, err = s.schedulerExecute(ctx, lease.ID, item.ID, item.Payload)
 		}
 		// release is idempotent; execute also releases in its finally block.
-		_ = s.schedulerRelease(context.Background(), lease.ID, false)
+		//
+		// 这里必须用有界 ctx。全程序只有这一处传 context.Background()，
+		// 而 release 走的是与生图同一条 client——主程序侧若 accept 后不响应，
+		// 这个 worker 就永久挂在这一行上。MaxConnsPerHost == Workers，
+		// 挂满 Workers 次即整网关不再出图。
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), schedulerReleaseTimeout)
+		_ = s.schedulerRelease(releaseCtx, lease.ID, false)
+		releaseCancel()
 		if err == nil {
 			item.Status, item.Result, item.Payload, item.Authorization = "success", response, nil, ""
 			s.completed.Add(1)
@@ -827,7 +840,13 @@ func main() {
 	}
 	cfg := loadConfig()
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, PoolSize: max(32, cfg.Workers+16), MinIdleConns: 8})
-	s := &server{cfg: cfg, rdb: rdb, started: time.Now(), client: &http.Client{Transport: &http.Transport{MaxIdleConns: cfg.Workers * 2, MaxIdleConnsPerHost: cfg.Workers, MaxConnsPerHost: cfg.Workers, IdleConnTimeout: 90 * time.Second}}}
+	s := &server{
+		cfg:         cfg,
+		rdb:         rdb,
+		started:     time.Now(),
+		client:      newBackendClient(cfg),
+		fetchClient: newRemoteFetchClient(),
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
