@@ -450,10 +450,3 @@ func truncate(value string, limit int) string {
 	}
 	return value[:limit]
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

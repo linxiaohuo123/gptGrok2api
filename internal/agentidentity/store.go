@@ -280,12 +280,7 @@ func first(values ...string) string {
 	}
 	return ""
 }
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+
 func sshPublicKey(key ed25519.PublicKey) string {
 	header := []byte("ssh-ed25519")
 	blob := make([]byte, 0, 4+len(header)+4+len(key))
