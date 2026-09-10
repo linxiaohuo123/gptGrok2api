@@ -51,8 +51,6 @@ func NewStore(dataDir, registerURL string, client *http.Client) *Store {
 }
 
 func (s *Store) Ensure(ctx context.Context, account map[string]any) (map[string]any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	access := value(account, "access_token", "accessToken")
 	if access == "" {
 		return nil, errors.New("本地账号缺少 Access Token，无法创建 Agent Identity")
@@ -68,15 +66,25 @@ func (s *Store) Ensure(ctx context.Context, account map[string]any) (map[string]
 	if accountID == "" || userID == "" {
 		return nil, errors.New("本地账号 JWT 缺少 ChatGPT 账号标识")
 	}
+	// 快路径：已有身份直接返回。只在读盘这一小段持锁。
+	s.mu.Lock()
 	items, err := s.load()
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 	for _, item := range items {
 		if item.AccountID == accountID {
-			return s.public(item), nil
+			public := s.public(item)
+			s.mu.Unlock()
+			return public, nil
 		}
 	}
+	s.mu.Unlock()
+
+	// 下面整段（生成密钥 + 最长 30s 的注册请求）必须在**锁外**执行。
+	// s.mu 是全局锁：持锁做网络 I/O 会让 Summary/AuthJSON 阻塞，而全量导出
+	// 是 N 个账号串行调用本函数——那意味着管理面冻结 N×30 秒。
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
@@ -109,6 +117,18 @@ func (s *Store) Ensure(ctx context.Context, account map[string]any) (map[string]
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	item := record{AccountID: accountID, UserID: userID, Email: first(value(account, "email"), value(profile, "email")), PlanType: first(value(account, "plan_type"), value(auth, "chatgpt_plan_type"), "free"), RuntimeID: runtimeID, PrivateKey: keyB64, CreatedAt: now, UpdatedAt: now}
+	// 回填时加锁并重新读盘：并发的另一次 Ensure 可能已经为同一账号建好了身份，
+	// 也可能写入了别的账号——必须基于最新的列表追加，不能拿锁外读到的旧快照覆盖。
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, loadErr := s.load(); loadErr == nil {
+		for _, existing := range current {
+			if existing.AccountID == accountID {
+				return s.public(existing), nil
+			}
+		}
+		items = current
+	}
 	items = append(items, item)
 	if err := s.save(items); err != nil {
 		return nil, err
