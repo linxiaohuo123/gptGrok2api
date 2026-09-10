@@ -216,7 +216,9 @@ func (s *Server) jobSnapshot(job map[string]any) map[string]any {
 	defer s.importJobMu.Unlock()
 	snapshot := cloneMap(job)
 	if errors, ok := job["errors"].([]any); ok {
-		snapshot["errors"] = append([]any(nil), errors...)
+		// 用 []any{} 而不是 []any(nil)：空列表会序列化成 JSON null，
+		// 而消费方写的是 errors.length。
+		snapshot["errors"] = append([]any{}, errors...)
 	}
 	return snapshot
 }
