@@ -121,15 +121,18 @@ func (s *Store) Ensure(ctx context.Context, account map[string]any) (map[string]
 	// 也可能写入了别的账号——必须基于最新的列表追加，不能拿锁外读到的旧快照覆盖。
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, loadErr := s.load(); loadErr == nil {
-		for _, existing := range current {
-			if existing.AccountID == accountID {
-				return s.public(existing), nil
-			}
-		}
-		items = current
+	// 读盘失败必须中止，不能退回锁外那份旧快照再落盘——那会把并发写入的
+	// 其它账号身份一起覆盖掉，正是这次要修的那个 bug 换个位置复发。
+	current, err := s.load()
+	if err != nil {
+		return nil, err
 	}
-	items = append(items, item)
+	for _, existing := range current {
+		if existing.AccountID == accountID {
+			return s.public(existing), nil
+		}
+	}
+	items = append(current, item)
 	if err := s.save(items); err != nil {
 		return nil, err
 	}
